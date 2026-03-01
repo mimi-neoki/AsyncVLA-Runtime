@@ -1,0 +1,17 @@
+[project]
+name = "asyncvla-runtime"
+version = "0.1.0"
+description = "Split-inference runtime scaffold for AsyncVLA (workstation + Pi/Hailo)"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "torch==2.2.0",
+    "torchvision==0.17.0",
+    "efficientnet-pytorch==0.7.1",
+    "numpy<2",
+    "pillow",
+    "pyyaml",
+    "requests",
+]
+
+[tool.uv]
+package = false
