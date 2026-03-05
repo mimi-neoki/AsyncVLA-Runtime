@@ -18,12 +18,14 @@ class HailoEdgeRunnerConfig:
     input_current_image: str = "current_image"
     input_delayed_image: str = "delayed_image"
     input_projected_tokens: str = "projected_tokens"
-    input_goal_pose: str = "goal_pose"
+    input_goal_pose: str | None = None
     output_action_chunk: str = "action_chunk"
-    image_height: int = 224
-    image_width: int = 224
+    image_height: int = 96
+    image_width: int = 96
     chunk_size: int = 8
     pose_dim: int = 4
+    normalize_imagenet: bool = True
+    image_layout: str = "nchw"
 
 
 class HailoEdgeRunner:
@@ -57,7 +59,18 @@ class HailoEdgeRunner:
         if arr.ndim != 3:
             raise ValueError(f"Expected HWC image, got {arr.shape}")
         resized = self._resize(arr)
-        return resized.astype(np.float32)[None, ...] / 255.0
+        data = resized.astype(np.float32)
+        if data.max() > 1.0:
+            data = data / 255.0
+        if self.config.normalize_imagenet:
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            data = (data - mean) / std
+        if self.config.image_layout.lower() == "nchw":
+            data = np.transpose(data, (2, 0, 1))
+        elif self.config.image_layout.lower() != "nhwc":
+            raise ValueError(f"Unsupported image_layout: {self.config.image_layout}")
+        return data[None, ...]
 
     def _build_inputs(
         self,
@@ -66,17 +79,21 @@ class HailoEdgeRunner:
         projected_tokens: np.ndarray,
         goal_pose: np.ndarray | None,
     ) -> dict[str, np.ndarray]:
-        goal = np.asarray(goal_pose if goal_pose is not None else np.zeros((3,), dtype=np.float32), dtype=np.float32)
-        goal = goal.reshape(1, -1)
         tokens = np.asarray(projected_tokens, dtype=np.float32)
         if tokens.ndim == 2:
             tokens = tokens[None, ...]
-        return {
+        inputs = {
             self.config.input_current_image: self._prep_image(current_image),
             self.config.input_delayed_image: self._prep_image(delayed_image),
             self.config.input_projected_tokens: tokens,
-            self.config.input_goal_pose: goal,
         }
+        if self.config.input_goal_pose:
+            goal = np.asarray(
+                goal_pose if goal_pose is not None else np.zeros((3,), dtype=np.float32),
+                dtype=np.float32,
+            ).reshape(1, -1)
+            inputs[self.config.input_goal_pose] = goal
+        return inputs
 
     def _init_hailo(self) -> None:
         if self._ready:

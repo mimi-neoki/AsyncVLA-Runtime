@@ -3,32 +3,18 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import sys
-import types
 from pathlib import Path
+import sys
 
+import numpy as np
+import onnxruntime as ort
 import torch
-import yaml
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-def remove_module_prefix(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    cleaned: dict[str, torch.Tensor] = {}
-    for key, value in state_dict.items():
-        if key.startswith("module."):
-            cleaned[key[len("module.") :]] = value
-        else:
-            cleaned[key] = value
-    return cleaned
-
-
-def infer_action_head_dims(state_dict: dict[str, torch.Tensor]) -> tuple[int, int, int]:
-    fc1_w = state_dict["model.fc1.weight"]
-    fc2_w = state_dict["model.fc2.weight"]
-    hidden_dim = int(fc1_w.shape[0])
-    in_features = int(fc1_w.shape[1])
-    input_dim = (in_features - 1) // 4
-    action_dim = int(fc2_w.shape[0])
-    return input_dim, hidden_dim, action_dim
+from asyncvla_pi.edge_adapter_model import load_edge_adapter_from_hf_snapshot
 
 
 def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -40,131 +26,157 @@ def run_cmd(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[s
     return proc
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Load AsyncVLA edge-side weights from HF snapshot and test inference")
-    parser.add_argument(
-        "--asyncvla-root",
-        default="/home/pi/gitrepo/AsyncVLA",
-        help="Path to AsyncVLA source repo",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Load AsyncVLA edge adapter from HF snapshot, export ONNX, and optionally run Hailo checks"
     )
     parser.add_argument(
         "--hf-dir",
-        default="/home/pi/gitrepo/AsyncVLA/AsyncVLA_release",
+        default="~/gitrepo/AsyncVLA_release",
         help="Path to HF snapshot directory",
     )
     parser.add_argument(
+        "--shead-checkpoint",
+        default="shead--750000_checkpoint.pt",
+        help="Edge adapter checkpoint filename",
+    )
+    parser.add_argument(
+        "--mha-num-attention-heads",
+        type=int,
+        default=4,
+        help="Head count used to instantiate the Transformer decoder",
+    )
+    parser.add_argument("--image-height", type=int, default=96)
+    parser.add_argument("--image-width", type=int, default=96)
+    parser.add_argument(
+        "--onnx-output",
+        default="./build/edge_adapter.onnx",
+        help="Output ONNX path for export check",
+    )
+    parser.add_argument("--skip-onnx", action="store_true")
+    parser.add_argument("--skip-hailo", action="store_true")
+    parser.add_argument(
         "--h10-hef",
         default="/usr/share/hailo-models/resnet_v1_50_h10.hef",
-        help="HEF path for Hailo-10H runtime test (must be H10 architecture)",
+        help="HEF path for Hailo-10H runtime smoke check",
     )
     parser.add_argument("--benchmark-seconds", type=int, default=3)
-    parser.add_argument("--skip-hailo", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    asyncvla_root = Path(args.asyncvla_root).expanduser().resolve()
+
+def check_onnx_equivalence(
+    onnx_path: Path,
+    model: torch.nn.Module,
+    current_image: torch.Tensor,
+    delayed_image: torch.Tensor,
+    projected_tokens: torch.Tensor,
+    rtol: float = 2e-3,
+    atol: float = 2e-3,
+) -> tuple[float, float]:
+    with torch.inference_mode():
+        torch_out = model(current_image, delayed_image, projected_tokens).cpu().numpy()
+
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    onnx_out = session.run(
+        None,
+        {
+            "current_image": current_image.cpu().numpy(),
+            "delayed_image": delayed_image.cpu().numpy(),
+            "projected_tokens": projected_tokens.cpu().numpy(),
+        },
+    )[0]
+    diff = np.abs(torch_out - onnx_out)
+    max_abs = float(diff.max())
+    mean_abs = float(diff.mean())
+    if not np.allclose(torch_out, onnx_out, rtol=rtol, atol=atol):
+        raise RuntimeError(
+            f"ONNX mismatch: max_abs={max_abs:.6f}, mean_abs={mean_abs:.6f}, rtol={rtol}, atol={atol}"
+        )
+    return max_abs, mean_abs
+
+
+def main() -> int:
+    args = parse_args()
     hf_dir = Path(args.hf_dir).expanduser().resolve()
-    h10_hef = Path(args.h10_hef).expanduser().resolve()
-
-    if not asyncvla_root.exists():
-        raise FileNotFoundError(f"AsyncVLA root not found: {asyncvla_root}")
     if not hf_dir.exists():
         raise FileNotFoundError(f"HF snapshot not found: {hf_dir}")
 
-    # Import AsyncVLA modules from source tree without executing prismatic/__init__.py.
-    sys.path.insert(0, str(asyncvla_root))
-    prismatic_dir = asyncvla_root / "prismatic"
-    pkg = types.ModuleType("prismatic")
-    pkg.__path__ = [str(prismatic_dir)]  # type: ignore[attr-defined]
-    sys.modules["prismatic"] = pkg
-    pkg_models = types.ModuleType("prismatic.models")
-    pkg_models.__path__ = [str(prismatic_dir / "models")]  # type: ignore[attr-defined]
-    sys.modules["prismatic.models"] = pkg_models
-    pkg_vla = types.ModuleType("prismatic.vla")
-    pkg_vla.__path__ = [str(prismatic_dir / "vla")]  # type: ignore[attr-defined]
-    sys.modules["prismatic.vla"] = pkg_vla
-
-    from prismatic.models.action_heads import L1RegressionActionHead_idcat
-    from prismatic.models.projectors import ProprioProjector
-    from prismatic.models.small_head import Edge_adapter
-
-    cfg_path = asyncvla_root / "config_nav" / "dataset_config.yaml"
-    with cfg_path.open("r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    obs_encoding_size = int(cfg["obs_encoding_size"])
-    nhead = int(cfg["mha_num_attention_heads"])
-    nlayers = int(cfg["mha_num_attention_layers"])
-    ff_factor = int(cfg["mha_ff_dim_factor"])
-
-    # 1) Load edge adapter (shead)
-    shead_ckpt = hf_dir / "shead--750000_checkpoint.pt"
-    shead_state = remove_module_prefix(torch.load(shead_ckpt, map_location="cpu"))
-    shead = Edge_adapter(
-        obs_encoding_size=obs_encoding_size,
-        mha_num_attention_heads=nhead,
-        mha_num_attention_layers=nlayers,
-        mha_ff_dim_factor=ff_factor,
+    model, arch, missing, unexpected = load_edge_adapter_from_hf_snapshot(
+        hf_dir=hf_dir,
+        checkpoint_name=args.shead_checkpoint,
+        mha_num_attention_heads=args.mha_num_attention_heads,
+        strict=True,
     )
-    missing_s, unexpected_s = shead.load_state_dict(shead_state, strict=True)
 
-    # 2) Load pose projector checkpoint (edge-side dependency in AsyncVLA split setup)
-    pose_ckpt = hf_dir / "pose_projector--750000_checkpoint.pt"
-    pose_state = remove_module_prefix(torch.load(pose_ckpt, map_location="cpu"))
-    llm_dim = int(pose_state["fc1.weight"].shape[0])
-    proprio_dim = int(pose_state["fc1.weight"].shape[1])
-    pose_projector = ProprioProjector(llm_dim=llm_dim, proprio_dim=proprio_dim)
-    missing_p, unexpected_p = pose_projector.load_state_dict(pose_state, strict=True)
+    if missing or unexpected:
+        raise RuntimeError(f"Unexpected key mismatch: missing={missing}, unexpected={unexpected}")
 
-    # 3) Load action head checkpoint for consistency check
-    action_ckpt = hf_dir / "action_head--750000_checkpoint.pt"
-    action_state = remove_module_prefix(torch.load(action_ckpt, map_location="cpu"))
-    in_dim, hidden_dim, action_dim = infer_action_head_dims(action_state)
-    action_head = L1RegressionActionHead_idcat(
-        input_dim=in_dim,
-        hidden_dim=hidden_dim,
-        action_dim=action_dim,
-    )
-    missing_a, unexpected_a = action_head.load_state_dict(action_state, strict=True)
-
-    shead.eval()
-    pose_projector.eval()
-    action_head.eval()
-
-    # Edge-only inference test (projected tokens are assumed to come from remote base VLA)
     torch.manual_seed(7)
-    obs_img = torch.randn(1, 3, 96, 96)
-    past_img = torch.randn(1, 3, 96, 96)
-    projected_tokens = torch.randn(1, 8, obs_encoding_size)
+    current_image = torch.randn(1, 3, args.image_height, args.image_width, dtype=torch.float32)
+    delayed_image = torch.randn(1, 3, args.image_height, args.image_width, dtype=torch.float32)
+    projected_tokens = torch.randn(1, arch.action_chunk_size, arch.obs_encoding_size, dtype=torch.float32)
 
     with torch.inference_mode():
-        delta_actions = shead(obs_img, past_img, projected_tokens)
+        action_chunk = model(current_image, delayed_image, projected_tokens)
 
-    print("[Edge weights load] OK")
-    print(f"shead checkpoint: {shead_ckpt}")
-    print(f"pose projector checkpoint: {pose_ckpt}")
-    print(f"action head checkpoint: {action_ckpt}")
-    print(f"shead missing/unexpected: {len(missing_s)}/{len(unexpected_s)}")
-    print(f"pose missing/unexpected: {len(missing_p)}/{len(unexpected_p)}")
-    print(f"action missing/unexpected: {len(missing_a)}/{len(unexpected_a)}")
-    print(f"delta_actions shape: {tuple(delta_actions.shape)}")
+    print("[Edge adapter load] OK")
+    print(f"hf_dir: {hf_dir}")
     print(
-        "delta_actions stats:",
+        "arch:",
         {
-            "min": float(delta_actions.min()),
-            "max": float(delta_actions.max()),
-            "mean": float(delta_actions.mean()),
+            "obs_encoding_size": arch.obs_encoding_size,
+            "seq_len": arch.seq_len,
+            "mha_layers": arch.mha_num_attention_layers,
+            "mha_ff_factor": arch.mha_ff_dim_factor,
+            "action_chunk_size": arch.action_chunk_size,
+            "action_dim": arch.action_dim,
         },
     )
+    print(f"shead missing/unexpected: {len(missing)}/{len(unexpected)}")
+    print(f"action_chunk shape: {tuple(action_chunk.shape)}")
+    print(
+        "action_chunk stats:",
+        {
+            "min": float(action_chunk.min()),
+            "max": float(action_chunk.max()),
+            "mean": float(action_chunk.mean()),
+        },
+    )
+
+    if not args.skip_onnx:
+        onnx_path = Path(args.onnx_output).expanduser().resolve()
+        onnx_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.onnx.export(
+            model,
+            (current_image, delayed_image, projected_tokens),
+            str(onnx_path),
+            input_names=["current_image", "delayed_image", "projected_tokens"],
+            output_names=["action_chunk"],
+            dynamic_axes={
+                "current_image": {0: "batch"},
+                "delayed_image": {0: "batch"},
+                "projected_tokens": {0: "batch"},
+                "action_chunk": {0: "batch"},
+            },
+            opset_version=17,
+        )
+        max_abs, mean_abs = check_onnx_equivalence(
+            onnx_path=onnx_path,
+            model=model,
+            current_image=current_image,
+            delayed_image=delayed_image,
+            projected_tokens=projected_tokens,
+        )
+        print(f"[ONNX export] OK: {onnx_path}")
+        print(f"onnx parity: max_abs={max_abs:.6f}, mean_abs={mean_abs:.6f}")
 
     if args.skip_hailo:
         return 0
 
+    h10_hef = Path(args.h10_hef).expanduser().resolve()
     if not h10_hef.exists():
-        raise FileNotFoundError(
-            f"H10 HEF not found: {h10_hef}. Provide --h10-hef to run hardware inference check."
-        )
+        raise FileNotFoundError(f"H10 HEF not found: {h10_hef}")
 
-    # Hailo runtime smoke test on Hailo-10H.
     print("\n[Hailo-10H runtime check]")
     scan = run_cmd(["hailortcli", "scan"])
     identify = run_cmd(["hailortcli", "fw-control", "identify"])
@@ -184,7 +196,6 @@ def main() -> int:
     print(scan.stdout.strip())
     print(identify.stdout.strip())
     print(parse.stdout.strip().splitlines()[0])
-    # Show just tail metrics from benchmark output for readability.
     bench_lines = [line for line in bench.stdout.strip().splitlines() if line.strip()]
     print("benchmark tail:")
     for line in bench_lines[-12:]:
@@ -192,7 +203,7 @@ def main() -> int:
 
     print(
         "\nNOTE: Hailo execution above validates Hailo-10H runtime path. "
-        "Running AsyncVLA edge adapter on Hailo requires an edge-adapter HEF compiled offline (x86 Dataflow Compiler)."
+        "Edge adapter deployment requires compiling this exported ONNX to HEF on x86 with Hailo Dataflow Compiler."
     )
     return 0
 

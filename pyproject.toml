@@ -8,6 +8,8 @@ dependencies = [
     "torchvision==0.17.0",
     "efficientnet-pytorch==0.7.1",
     "numpy<2",
+    "onnx",
+    "onnxruntime",
     "pillow",
     "pyyaml",
     "requests",

@@ -2,124 +2,160 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 from pathlib import Path
-from typing import Callable
+import sys
 
+import numpy as np
 import torch
-import torch.nn as nn
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-class EdgeAdapterExportWrapper(nn.Module):
-    """Fallback export wrapper when no custom edge module is provided."""
-
-    def __init__(self, chunk_size: int, projected_dim: int, pose_dim: int) -> None:
-        super().__init__()
-        self.chunk_size = chunk_size
-        self.pose_dim = pose_dim
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-        )
-        self.token_proj = nn.Sequential(
-            nn.Linear(projected_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-        )
-        self.head = nn.Sequential(
-            nn.Linear(32 + 32 + 128 + 3, 256),
-            nn.ReLU(),
-            nn.Linear(256, chunk_size * pose_dim),
-        )
-
-    def forward(
-        self,
-        current_image: torch.Tensor,
-        delayed_image: torch.Tensor,
-        projected_tokens: torch.Tensor,
-        goal_pose: torch.Tensor,
-    ) -> torch.Tensor:
-        curr = self.image_encoder(current_image)
-        delay = self.image_encoder(delayed_image)
-        token_feat = self.token_proj(projected_tokens.mean(dim=1))
-        fused = torch.cat([curr, delay, token_feat, goal_pose], dim=-1)
-        out = self.head(fused)
-        return out.view(out.shape[0], self.chunk_size, self.pose_dim)
-
-
-def _resolve_factory(factory: str | None) -> Callable[[], nn.Module] | None:
-    if not factory:
-        return None
-    module_name, attr_name = factory.split(":", 1)
-    module = importlib.import_module(module_name)
-    value = getattr(module, attr_name)
-    if not callable(value):
-        raise TypeError(f"Factory is not callable: {factory}")
-    return value
+from asyncvla_pi.edge_adapter_model import load_edge_adapter_from_hf_snapshot
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export AsyncVLA edge adapter to ONNX")
+    parser = argparse.ArgumentParser(description="Export AsyncVLA edge adapter (shead) to ONNX")
+    parser.add_argument(
+        "--hf-dir",
+        default="~/gitrepo/AsyncVLA_release",
+        help="HF snapshot directory containing shead checkpoint",
+    )
+    parser.add_argument(
+        "--shead-checkpoint",
+        default="shead--750000_checkpoint.pt",
+        help="Edge adapter checkpoint filename",
+    )
     parser.add_argument("--output", required=True, help="Output ONNX path")
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--image-height", type=int, default=224)
-    parser.add_argument("--image-width", type=int, default=224)
-    parser.add_argument("--chunk-size", type=int, default=8)
-    parser.add_argument("--projected-dim", type=int, default=1024)
-    parser.add_argument("--pose-dim", type=int, default=4)
+    parser.add_argument("--image-height", type=int, default=96)
+    parser.add_argument("--image-width", type=int, default=96)
+    parser.add_argument(
+        "--mha-num-attention-heads",
+        type=int,
+        default=4,
+        help="Must match training config (config_nav uses 4)",
+    )
     parser.add_argument("--opset", type=int, default=17)
     parser.add_argument(
-        "--model-factory",
-        default=None,
-        help="Optional import path module:function returning nn.Module",
+        "--dynamic-batch",
+        action="store_true",
+        help="Export with dynamic batch axis. Disabled by default for Hailo parser compatibility.",
     )
+    parser.add_argument("--verify-onnxruntime", action="store_true")
+    parser.add_argument("--rtol", type=float, default=2e-3)
+    parser.add_argument("--atol", type=float, default=2e-3)
     return parser.parse_args()
+
+
+def _dummy_inputs(
+    batch_size: int,
+    image_height: int,
+    image_width: int,
+    chunk_size: int,
+    projected_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    current_image = torch.randn(batch_size, 3, image_height, image_width, dtype=torch.float32)
+    delayed_image = torch.randn(batch_size, 3, image_height, image_width, dtype=torch.float32)
+    projected_tokens = torch.randn(batch_size, chunk_size, projected_dim, dtype=torch.float32)
+    return current_image, delayed_image, projected_tokens
+
+
+def _verify_with_onnxruntime(
+    onnx_path: Path,
+    model: torch.nn.Module,
+    inputs: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    rtol: float,
+    atol: float,
+) -> None:
+    import onnxruntime as ort
+
+    current_image, delayed_image, projected_tokens = inputs
+    with torch.inference_mode():
+        torch_out = model(current_image, delayed_image, projected_tokens).detach().cpu().numpy()
+
+    session = ort.InferenceSession(
+        str(onnx_path),
+        providers=["CPUExecutionProvider"],
+    )
+    ort_out = session.run(
+        None,
+        {
+            "current_image": current_image.cpu().numpy(),
+            "delayed_image": delayed_image.cpu().numpy(),
+            "projected_tokens": projected_tokens.cpu().numpy(),
+        },
+    )[0]
+
+    if not np.allclose(torch_out, ort_out, rtol=rtol, atol=atol):
+        diff = np.abs(torch_out - ort_out)
+        raise RuntimeError(
+            "ONNXRuntime output mismatch: "
+            f"max_abs={float(diff.max()):.6f}, mean_abs={float(diff.mean()):.6f}, "
+            f"rtol={rtol}, atol={atol}"
+        )
 
 
 def main() -> None:
     args = parse_args()
 
-    factory = _resolve_factory(args.model_factory)
-    if factory is not None:
-        model = factory()
-    else:
-        model = EdgeAdapterExportWrapper(
-            chunk_size=args.chunk_size,
-            projected_dim=args.projected_dim,
-            pose_dim=args.pose_dim,
+    model, arch, missing, unexpected = load_edge_adapter_from_hf_snapshot(
+        hf_dir=args.hf_dir,
+        checkpoint_name=args.shead_checkpoint,
+        mha_num_attention_heads=args.mha_num_attention_heads,
+        strict=True,
+    )
+
+    if missing or unexpected:
+        raise RuntimeError(
+            f"Checkpoint mismatch detected even with strict=True: missing={missing}, unexpected={unexpected}"
         )
     model.eval()
 
-    b = args.batch_size
-    current_image = torch.randn(b, 3, args.image_height, args.image_width)
-    delayed_image = torch.randn(b, 3, args.image_height, args.image_width)
-    projected_tokens = torch.randn(b, args.chunk_size, args.projected_dim)
-    goal_pose = torch.randn(b, 3)
+    inputs = _dummy_inputs(
+        batch_size=args.batch_size,
+        image_height=args.image_height,
+        image_width=args.image_width,
+        chunk_size=arch.action_chunk_size,
+        projected_dim=arch.obs_encoding_size,
+    )
 
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.onnx.export(
-        model,
-        (current_image, delayed_image, projected_tokens, goal_pose),
-        str(output_path),
-        input_names=["current_image", "delayed_image", "projected_tokens", "goal_pose"],
-        output_names=["action_chunk"],
-        dynamic_axes={
+    export_kwargs: dict[str, object] = {
+        "input_names": ["current_image", "delayed_image", "projected_tokens"],
+        "output_names": ["action_chunk"],
+        "opset_version": args.opset,
+    }
+    if args.dynamic_batch:
+        export_kwargs["dynamic_axes"] = {
             "current_image": {0: "batch"},
             "delayed_image": {0: "batch"},
             "projected_tokens": {0: "batch"},
-            "goal_pose": {0: "batch"},
             "action_chunk": {0: "batch"},
-        },
-        opset_version=args.opset,
-    )
+        }
+
+    torch.onnx.export(model, inputs, str(output_path), **export_kwargs)
+
+    if args.verify_onnxruntime:
+        _verify_with_onnxruntime(
+            onnx_path=output_path,
+            model=model,
+            inputs=inputs,
+            rtol=args.rtol,
+            atol=args.atol,
+        )
 
     print(f"Exported ONNX to: {output_path}")
+    print(
+        f"Architecture: obs_encoding_size={arch.obs_encoding_size}, "
+        f"seq_len={arch.seq_len}, layers={arch.mha_num_attention_layers}, "
+        f"ff_factor={arch.mha_ff_dim_factor}, action_shape=[{arch.action_chunk_size}, {arch.action_dim}]"
+    )
+    if args.verify_onnxruntime:
+        print("ONNXRuntime verification: OK")
 
 
 if __name__ == "__main__":
