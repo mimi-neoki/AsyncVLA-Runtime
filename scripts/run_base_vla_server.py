@@ -42,15 +42,20 @@ def _prepare_observation(payload: dict[str, Any], image_key: str) -> dict[str, A
         "timestamp_ns": int(payload.get("timestamp_ns", time.monotonic_ns())),
         "instruction": payload.get("instruction", ""),
         "goal_pose": payload.get("goal_pose", [0.0, 0.0, 0.0]),
+        "task_mode": payload.get("task_mode"),
+        "task_id": payload.get("task_id"),
+        "satellite": bool(payload.get("satellite", False)),
     }
 
     images = payload.get("images", {})
     if not isinstance(images, dict) or image_key not in images:
         raise KeyError(f"Missing images.{image_key} in request payload")
 
-    image = _decode_image_blob(images[image_key])
-    obs[image_key] = image
-    obs["images"] = {image_key: image}
+    decoded_images: dict[str, np.ndarray] = {}
+    for key, blob in images.items():
+        decoded_images[key] = _decode_image_blob(blob)
+    obs[image_key] = decoded_images[image_key]
+    obs["images"] = decoded_images
     return obs
 
 
@@ -101,12 +106,49 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--hf-dir",
-        default="/home/pi/gitrepo/AsyncVLA/AsyncVLA_release",
-        help="HF snapshot containing action_proj checkpoint",
+        default="~/gitrepo/AsyncVLA_release",
+        help="HF snapshot containing base model + projector checkpoints",
+    )
+    parser.add_argument(
+        "--asyncvla-repo-dir",
+        default="~/gitrepo/AsyncVLA",
+        help="Path to official AsyncVLA repo (for prismatic namespace during HF trust_remote_code import).",
     )
     parser.add_argument("--image-key", default="front_image")
+    parser.add_argument("--goal-image-key", default="goal_image")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--quantization", choices=["none", "8bit"], default="none")
+    parser.add_argument(
+        "--task-mode",
+        choices=[
+            "auto",
+            "satellite_only",
+            "pose_and_satellite",
+            "satellite_and_image",
+            "all",
+            "pose_only",
+            "pose_and_image",
+            "image_only",
+            "language_only",
+            "language_and_pose",
+        ],
+        default="auto",
+        help="Task mode mapped to AsyncVLA modality_id (0-8).",
+    )
+    parser.add_argument(
+        "--satellite-default",
+        action="store_true",
+        help="Default satellite=True for auto task-mode resolution when request does not set satellite.",
+    )
+    parser.add_argument("--num-images-in-input", type=int, default=2)
+    parser.add_argument("--unnorm-key", default=None)
+    parser.add_argument("--task-id", type=int, default=None)
+    parser.add_argument(
+        "--disable-goal-image-duplication",
+        action="store_true",
+        help="If set, require images.goal_image in request payload.",
+    )
     return parser.parse_args()
 
 
@@ -119,8 +161,17 @@ def main() -> None:
     policy = AsyncVLABasePolicy.from_snapshot(
         snapshot_dir=str(hf_dir),
         image_key=args.image_key,
+        goal_image_key=args.goal_image_key,
+        asyncvla_repo_dir=args.asyncvla_repo_dir,
         device=args.device,
         dtype=args.dtype,
+        quantization=args.quantization,
+        task_mode=args.task_mode,
+        satellite_default=args.satellite_default,
+        num_images_in_input=args.num_images_in_input,
+        unnorm_key=args.unnorm_key,
+        task_id=args.task_id,
+        duplicate_current_image_as_goal=not args.disable_goal_image_duplication,
     )
 
     handler = PolicyHandler
