@@ -31,6 +31,14 @@ class EdgeRobotClientConfig:
     timestamp_key: str = "timestamp_ns"
     goal_pose_key: str = "goal_pose"
     current_pose_key: str = "current_pose"
+    instruction_key: str = "instruction"
+    task_mode_key: str = "task_mode"
+    task_id_key: str = "task_id"
+    satellite_key: str = "satellite"
+    default_instruction: str | None = None
+    default_task_mode: str | None = None
+    default_task_id: int | None = None
+    default_satellite: bool | None = None
     camera_hz: float = 15.0
     edge_hz: float = 8.0
     policy_hz: float = 8.0
@@ -141,8 +149,21 @@ class EdgeAwareRobotClient:
                 }
             },
         }
-        if "instruction" in observation:
-            payload["instruction"] = observation["instruction"]
+        instruction = observation.get(self.config.instruction_key, self.config.default_instruction)
+        if instruction is not None:
+            payload[self.config.instruction_key] = str(instruction)
+
+        task_mode = observation.get(self.config.task_mode_key, self.config.default_task_mode)
+        if task_mode is not None:
+            payload[self.config.task_mode_key] = task_mode
+
+        task_id = observation.get(self.config.task_id_key, self.config.default_task_id)
+        if task_id is not None:
+            payload[self.config.task_id_key] = int(task_id)
+
+        satellite = observation.get(self.config.satellite_key, self.config.default_satellite)
+        if satellite is not None:
+            payload[self.config.satellite_key] = bool(satellite)
         return payload
 
     def _policy_loop(self) -> None:

@@ -38,6 +38,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=0.0)
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
+    parser.add_argument("--instruction", default=None, help="Language instruction sent to base-VLA server.")
+    parser.add_argument(
+        "--task-mode",
+        choices=[
+            "auto",
+            "satellite_only",
+            "pose_and_satellite",
+            "satellite_and_image",
+            "all",
+            "pose_only",
+            "pose_and_image",
+            "image_only",
+            "language_only",
+            "language_and_pose",
+        ],
+        default=None,
+        help="Optional AsyncVLA task mode override sent to the server.",
+    )
+    parser.add_argument("--task-id", type=int, default=None, help="Optional AsyncVLA modality id override (0-8).")
+    parser.add_argument(
+        "--satellite",
+        dest="satellite",
+        action="store_true",
+        help="Send satellite=true in policy payload.",
+    )
+    parser.add_argument(
+        "--no-satellite",
+        dest="satellite",
+        action="store_false",
+        help="Send satellite=false in policy payload.",
+    )
+    parser.set_defaults(satellite=None)
 
     # HEF I/O names for current model in models/edge_adapter_v520.hef
     parser.add_argument("--input-current-name", default="edge/input_layer2")
@@ -161,6 +193,10 @@ def main() -> None:
         pd_controller=PDController(PDControllerConfig()),
         config=EdgeRobotClientConfig(
             policy_url=args.policy_url,
+            default_instruction=args.instruction,
+            default_task_mode=args.task_mode,
+            default_task_id=args.task_id,
+            default_satellite=args.satellite,
             camera_hz=args.camera_fps,
             edge_hz=args.edge_hz,
             policy_hz=args.policy_hz,
@@ -170,6 +206,14 @@ def main() -> None:
     print("Pi edge client start")
     print(f"policy_url={args.policy_url}")
     print(f"hef={hef_path}")
+    if args.instruction is not None:
+        print(f"instruction={args.instruction}")
+    if args.task_mode is not None:
+        print(f"task_mode={args.task_mode}")
+    if args.task_id is not None:
+        print(f"task_id={args.task_id}")
+    if args.satellite is not None:
+        print(f"satellite={args.satellite}")
     print(
         f"inputs(current, delayed, tokens)=({args.input_current_name}, {args.input_delayed_name}, {args.input_tokens_name}), "
         f"output={args.output_chunk_name}"
