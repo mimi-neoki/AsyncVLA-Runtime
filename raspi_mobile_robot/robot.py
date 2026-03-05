@@ -61,6 +61,16 @@ class RaspiMobileRobot(Robot):
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.camera_width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camera_height)
         self._cap.set(cv2.CAP_PROP_FPS, self.config.camera_fps)
+        # Some camera stacks report opened=True but fail on first read.
+        # Validate capture path here so callers can handle fallback logic.
+        for _ in range(20):
+            ok, _ = self._cap.read()
+            if ok:
+                return
+            time.sleep(0.1)
+        self._cap.release()
+        self._cap = None
+        raise RuntimeError("Camera opened but failed to read initial frame")
 
     def disconnect(self) -> None:
         if self._cap is not None:
@@ -75,7 +85,20 @@ class RaspiMobileRobot(Robot):
         ok, frame = self._cap.read()
         if not ok:
             raise RuntimeError("Failed to read camera frame")
-        return frame
+        array = np.asarray(frame)
+        # libcamerify/OpenCV may expose raw frame bytes as shape (1, N).
+        if array.ndim == 2 and array.shape[0] == 1:
+            flat = array.reshape(-1)
+            w = int(self.config.camera_width)
+            h = int(self.config.camera_height)
+            if flat.size == h * w * 3:
+                return flat.reshape(h, w, 3)
+            if flat.size == h * w:
+                return flat.reshape(h, w)
+            if flat.size == h * w * 2 and cv2 is not None:
+                yuyv = flat.reshape(h, w, 2)
+                return cv2.cvtColor(yuyv, cv2.COLOR_YUV2BGR_YUY2)
+        return array
 
     def get_observation(self) -> dict[str, Any]:
         frame = self._capture_image()

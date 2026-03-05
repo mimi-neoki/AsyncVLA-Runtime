@@ -13,7 +13,12 @@ dependencies = [
     "pillow",
     "pyyaml",
     "requests",
+    "opencv-python>=4.11.0.86",
+    "hailort",
 ]
 
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+hailort = { path = "hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }

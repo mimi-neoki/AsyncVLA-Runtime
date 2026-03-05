@@ -29,6 +29,7 @@ class HailoEdgeRunnerConfig:
     input_format_type: str = "float32"
     output_format_type: str = "float32"
     image_scale_255: bool = True
+    token_uint8_mode: str = "dynamic_minmax"
 
 
 class HailoEdgeRunner:
@@ -48,6 +49,10 @@ class HailoEdgeRunner:
         self._network_group: Any = None
         self._network_group_params: Any = None
         self._infer_pipeline: Any = None
+        self._target: Any = None
+        self._infer_model: Any = None
+        self._configured_infer_model: Any = None
+        self._mode: str = "vstreams"
 
     def _resize(self, image: np.ndarray) -> np.ndarray:
         if cv2 is not None:
@@ -62,7 +67,7 @@ class HailoEdgeRunner:
         if arr.ndim != 3:
             raise ValueError(f"Expected HWC image, got {arr.shape}")
         resized = self._resize(arr)
-        if self.config.input_format_type.lower() == "uint8":
+        if self.config.input_format_type.lower() in {"uint8", "auto"}:
             data = resized.astype(np.uint8)
         else:
             data = resized.astype(np.float32)
@@ -78,6 +83,23 @@ class HailoEdgeRunner:
             raise ValueError(f"Unsupported image_layout: {self.config.image_layout}")
         return data[None, ...]
 
+    def _prep_tokens(self, projected_tokens: np.ndarray) -> np.ndarray:
+        tokens = np.asarray(projected_tokens)
+        if tokens.ndim == 2:
+            tokens = tokens[None, ...]
+        if self.config.input_format_type.lower() not in {"uint8", "auto"}:
+            return tokens.astype(np.float32)
+        if tokens.dtype == np.uint8:
+            return tokens
+        if self.config.token_uint8_mode == "dynamic_minmax":
+            t = tokens.astype(np.float32)
+            t_min = t.min(axis=(1, 2), keepdims=True)
+            t_max = t.max(axis=(1, 2), keepdims=True)
+            denom = np.maximum(t_max - t_min, 1e-6)
+            q = np.clip(np.round((t - t_min) / denom * 255.0), 0, 255).astype(np.uint8)
+            return q
+        return np.clip(np.round(tokens), 0, 255).astype(np.uint8)
+
     def _build_inputs(
         self,
         current_image: np.ndarray,
@@ -85,9 +107,7 @@ class HailoEdgeRunner:
         projected_tokens: np.ndarray,
         goal_pose: np.ndarray | None,
     ) -> dict[str, np.ndarray]:
-        tokens = np.asarray(projected_tokens, dtype=np.float32)
-        if tokens.ndim == 2:
-            tokens = tokens[None, ...]
+        tokens = self._prep_tokens(projected_tokens)
         inputs = {
             self.config.input_current_image: self._prep_image(current_image),
             self.config.input_delayed_image: self._prep_image(delayed_image),
@@ -131,21 +151,49 @@ class HailoEdgeRunner:
                 "pyhailort is unavailable. Install hailo_platform or pass fallback_fn for simulation."
             ) from exc
 
-        hef = HEF(str(Path(self.config.hef_path).expanduser().resolve()))
+        hef_path = str(Path(self.config.hef_path).expanduser().resolve())
+        hef = HEF(hef_path)
         target = VDevice()
-        configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
-        network_group = target.configure(hef, configure_params)[0]
-        network_group_params = network_group.create_params()
-        input_format_type = self._resolve_format_type(self.config.input_format_type, FormatType)
-        output_format_type = self._resolve_format_type(self.config.output_format_type, FormatType)
-        input_params = InputVStreamParams.make(network_group, format_type=input_format_type)
-        output_params = OutputVStreamParams.make(network_group, format_type=output_format_type)
-        infer_pipeline = InferVStreams(network_group, input_params, output_params)
+        self._target = target
 
-        self._network_group = network_group
-        self._network_group_params = network_group_params
-        self._infer_pipeline = infer_pipeline
+        # Preferred path: VStreams. Some Hailo10H + HEF combinations may raise
+        # HAILO_NOT_IMPLEMENTED on configure, so fallback to InferModel API.
+        try:
+            configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
+            network_group = target.configure(hef, configure_params)[0]
+            network_group_params = network_group.create_params()
+            input_format_type = self._resolve_format_type(self.config.input_format_type, FormatType)
+            output_format_type = self._resolve_format_type(self.config.output_format_type, FormatType)
+            input_params = InputVStreamParams.make(network_group, format_type=input_format_type)
+            output_params = OutputVStreamParams.make(network_group, format_type=output_format_type)
+            infer_pipeline = InferVStreams(network_group, input_params, output_params)
+
+            self._network_group = network_group
+            self._network_group_params = network_group_params
+            self._infer_pipeline = infer_pipeline
+            self._mode = "vstreams"
+            self._ready = True
+            return
+        except Exception as exc:
+            message = str(exc)
+            if "HAILO_NOT_IMPLEMENTED" not in message:
+                # Try InferModel fallback regardless; if it fails we re-raise later.
+                pass
+
+        infer_model = target.create_infer_model(hef_path)
+        configured = infer_model.configure()
+        self._infer_model = infer_model
+        self._configured_infer_model = configured
+        self._mode = "infer_model"
         self._ready = True
+
+    @staticmethod
+    def _align_rank_for_infer_model(array: np.ndarray, expected_rank: int) -> np.ndarray:
+        if array.ndim == expected_rank:
+            return array
+        if array.ndim == expected_rank + 1 and array.shape[0] == 1:
+            return array[0]
+        return array
 
     def infer(
         self,
@@ -163,13 +211,35 @@ class HailoEdgeRunner:
             return out
 
         self._init_hailo()
-        with self._network_group.activate(self._network_group_params):
-            output_dict = self._infer_pipeline.infer(inputs)
-        if self.config.output_action_chunk in output_dict:
-            output = output_dict[self.config.output_action_chunk]
+        if self._mode == "vstreams":
+            with self._network_group.activate(self._network_group_params):
+                output_dict = self._infer_pipeline.infer(inputs)
+            if self.config.output_action_chunk in output_dict:
+                output = output_dict[self.config.output_action_chunk]
+            else:
+                output = next(iter(output_dict.values()))
         else:
-            output = next(iter(output_dict.values()))
+            configured = self._configured_infer_model
+            bindings = configured.create_bindings()
+
+            for name, value in inputs.items():
+                expected_shape = tuple(self._infer_model.input(name).shape)
+                arr = self._align_rank_for_infer_model(np.asarray(value), expected_rank=len(expected_shape))
+                bindings.input(name).set_buffer(arr)
+
+            output_name = self.config.output_action_chunk
+            if output_name not in self._infer_model.output_names:
+                output_name = self._infer_model.output_names[0]
+            out_shape = tuple(self._infer_model.output(output_name).shape)
+            out_dtype = np.uint8 if self.config.output_format_type.lower() in {"uint8", "auto"} else np.float32
+            out_buf = np.empty(out_shape, dtype=out_dtype)
+            bindings.output(output_name).set_buffer(out_buf)
+            configured.run([bindings], 10000)
+            output = out_buf
+
         output = np.asarray(output, dtype=np.float32)
+        if output.ndim == 3 and output.shape[1] == 1 and output.shape[0] == self.config.chunk_size:
+            output = output.reshape(1, self.config.chunk_size, -1)
         if output.ndim == 2:
             output = output[None, ...]
         if output.ndim != 3:

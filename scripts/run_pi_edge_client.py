@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -45,14 +47,65 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
     parser.add_argument("--input-format", choices=["uint8", "float32", "auto"], default="uint8")
-    parser.add_argument("--output-format", choices=["uint8", "float32", "auto"], default="float32")
+    parser.add_argument("--output-format", choices=["uint8", "float32", "auto"], default="auto")
     parser.add_argument("--normalize-imagenet", action="store_true")
     parser.add_argument("--image-scale-255", action="store_true")
+    parser.add_argument(
+        "--libcamerify",
+        choices=["auto", "off", "on"],
+        default="auto",
+        help="Wrap process with libcamerify for OpenCV camera capture on libcamera systems.",
+    )
     return parser.parse_args()
+
+
+def _reexec_with_libcamerify() -> None:
+    libcamerify = shutil.which("libcamerify")
+    if not libcamerify:
+        raise RuntimeError("libcamerify command not found")
+    env = dict(os.environ)
+    env["ASYNCVLA_LIBCAMERIFY_ACTIVE"] = "1"
+    cmd = [libcamerify, sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
+    print("Re-exec with libcamerify for OpenCV camera capture...")
+    os.execvpe(libcamerify, cmd, env)
+
+
+def _ensure_hailo_runtime_available() -> None:
+    try:
+        import hailo_platform  # noqa: F401
+        return
+    except Exception as exc:
+        already_fallback = os.environ.get("ASYNCVLA_SYSTEMPY_ACTIVE") == "1"
+        system_python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else shutil.which("python3")
+        current_python = Path(sys.executable).resolve()
+        if (
+            not already_fallback
+            and system_python
+            and Path(system_python).resolve() != current_python
+        ):
+            env = dict(os.environ)
+            env["ASYNCVLA_SYSTEMPY_ACTIVE"] = "1"
+            cmd = [system_python, str(Path(__file__).resolve()), *sys.argv[1:]]
+            print(
+                "Hailo runtime import failed in current interpreter; "
+                "retrying with system python3..."
+            )
+            os.execvpe(system_python, cmd, env)
+        raise RuntimeError(
+            "pyhailort is not available in this Python environment. "
+            "Install matching hailort package for this interpreter or run with system python3."
+        ) from exc
 
 
 def main() -> None:
     args = parse_args()
+    _ensure_hailo_runtime_available()
+    libcamerify_active = os.environ.get("ASYNCVLA_LIBCAMERIFY_ACTIVE") == "1"
+    if args.libcamerify == "on" and not libcamerify_active:
+        _reexec_with_libcamerify()
+    if args.libcamerify == "auto" and not libcamerify_active and shutil.which("libcamerify"):
+        _reexec_with_libcamerify()
+
     hef_path = Path(args.hef).expanduser().resolve()
     if not hef_path.exists():
         raise FileNotFoundError(f"HEF not found: {hef_path}")
