@@ -26,6 +26,9 @@ class HailoEdgeRunnerConfig:
     pose_dim: int = 4
     normalize_imagenet: bool = True
     image_layout: str = "nchw"
+    input_format_type: str = "float32"
+    output_format_type: str = "float32"
+    image_scale_255: bool = True
 
 
 class HailoEdgeRunner:
@@ -59,10 +62,13 @@ class HailoEdgeRunner:
         if arr.ndim != 3:
             raise ValueError(f"Expected HWC image, got {arr.shape}")
         resized = self._resize(arr)
-        data = resized.astype(np.float32)
-        if data.max() > 1.0:
+        if self.config.input_format_type.lower() == "uint8":
+            data = resized.astype(np.uint8)
+        else:
+            data = resized.astype(np.float32)
+        if self.config.image_scale_255 and data.dtype != np.uint8 and data.max() > 1.0:
             data = data / 255.0
-        if self.config.normalize_imagenet:
+        if self.config.normalize_imagenet and data.dtype != np.uint8:
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
             data = (data - mean) / std
@@ -95,6 +101,17 @@ class HailoEdgeRunner:
             inputs[self.config.input_goal_pose] = goal
         return inputs
 
+    @staticmethod
+    def _resolve_format_type(format_type_name: str, format_enum: Any) -> Any:
+        name = format_type_name.strip().lower()
+        if name == "float32":
+            return format_enum.FLOAT32
+        if name == "uint8":
+            return format_enum.UINT8
+        if name == "auto":
+            return format_enum.AUTO
+        raise ValueError(f"Unsupported format type: {format_type_name}")
+
     def _init_hailo(self) -> None:
         if self._ready:
             return
@@ -119,8 +136,10 @@ class HailoEdgeRunner:
         configure_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
         network_group = target.configure(hef, configure_params)[0]
         network_group_params = network_group.create_params()
-        input_params = InputVStreamParams.make(network_group, format_type=FormatType.FLOAT32)
-        output_params = OutputVStreamParams.make(network_group, format_type=FormatType.FLOAT32)
+        input_format_type = self._resolve_format_type(self.config.input_format_type, FormatType)
+        output_format_type = self._resolve_format_type(self.config.output_format_type, FormatType)
+        input_params = InputVStreamParams.make(network_group, format_type=input_format_type)
+        output_params = OutputVStreamParams.make(network_group, format_type=output_format_type)
         infer_pipeline = InferVStreams(network_group, input_params, output_params)
 
         self._network_group = network_group
