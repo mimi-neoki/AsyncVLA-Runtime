@@ -50,6 +50,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
     parser.add_argument("--instruction", default="move forward")
+    parser.add_argument(
+        "--task-mode",
+        choices=[
+            "auto",
+            "satellite_only",
+            "pose_and_satellite",
+            "satellite_and_image",
+            "all",
+            "pose_only",
+            "pose_and_image",
+            "image_only",
+            "language_only",
+            "language_and_pose",
+        ],
+        default=None,
+        help="Optional AsyncVLA task mode override sent to the server.",
+    )
+    parser.add_argument("--task-id", type=int, default=None, help="Optional AsyncVLA modality id override (0-8).")
+    parser.add_argument(
+        "--satellite",
+        dest="satellite",
+        action="store_true",
+        help="Send satellite=true in policy payload.",
+    )
+    parser.add_argument(
+        "--no-satellite",
+        dest="satellite",
+        action="store_false",
+        help="Send satellite=false in policy payload.",
+    )
+    parser.set_defaults(satellite=None)
 
     # HEF vstream names for edge_adapter_v520.hef
     parser.add_argument("--input-current-name", default="edge/input_layer2")
@@ -333,6 +364,13 @@ def main() -> None:
         )
 
     print(f"Start demo. policy_url={args.policy_url}, hef={hef_path}")
+    print(f"instruction={args.instruction}")
+    if args.task_mode is not None:
+        print(f"task_mode={args.task_mode}")
+    if args.task_id is not None:
+        print(f"task_id={args.task_id}")
+    if args.satellite is not None:
+        print(f"satellite={args.satellite}")
     robot.connect()
 
     def capture_loop() -> None:
@@ -376,6 +414,12 @@ def main() -> None:
                             }
                         },
                     }
+                    if args.task_mode is not None:
+                        payload["task_mode"] = args.task_mode
+                    if args.task_id is not None:
+                        payload["task_id"] = int(args.task_id)
+                    if args.satellite is not None:
+                        payload["satellite"] = bool(args.satellite)
                     t_policy = time.monotonic()
                     resp = requests.post(
                         args.policy_url,
