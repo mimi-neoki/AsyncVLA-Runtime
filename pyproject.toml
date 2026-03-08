@@ -4,6 +4,12 @@ version = "0.1.0"
 description = "Split-inference runtime scaffold for AsyncVLA (workstation + Pi/Hailo)"
 requires-python = ">=3.10,<3.11"
 dependencies = [
+    "numpy<2",
+    "requests",
+]
+
+[project.optional-dependencies]
+server = [
     "torch==2.2.0",
     "torchvision==0.17.0",
     "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
@@ -16,18 +22,17 @@ dependencies = [
     "rich",
     "einops",
     "efficientnet-pytorch==0.7.1",
-    "numpy<2",
     "onnx",
     "onnxruntime",
     "pillow",
     "pyyaml",
-    "requests",
+]
+client = [
     "opencv-python>=4.11.0.86",
-    "hailort",
+]
+test = [
+    "pytest>=8.0.0",
 ]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-hailort = { path = "hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
