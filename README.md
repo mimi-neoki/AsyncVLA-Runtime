@@ -1,6 +1,6 @@
 # AsyncVLA Runtime Setup Guide
 
-This repository contains a split-inference runtime for AsyncVLA:
+This repository contains an unofficial split-inference runtime for [AsyncVLA](https://asyncvla.github.io/):
 
 - **Server side (GPU workstation):** base VLA inference and projected token generation
 - **Client side (Raspberry Pi 5):** edge adapter inference (Hailo) and control loop
@@ -11,11 +11,19 @@ This repository contains a split-inference runtime for AsyncVLA:
 - [`uv`](https://docs.astral.sh/uv/)
 - Linux environment
 - For server mode: NVIDIA GPU + CUDA-compatible PyTorch runtime
-- For client mode: Raspberry Pi 5 (`aarch64`) and Hailo runtime
+- For client mode: Raspberry Pi 5 (`aarch64`) and Hailo runtime (AI HAT)
 
 ## 2. Clone and Enter Repository
 
 ```bash
+# Download model weight
+git clone https://huggingface.co/NHirose/AsyncVLA_release
+cd AsyncVLA_release
+git-lfs pull
+cd ..
+
+# Download code
+git clone https://github.com/mimi-neoki/AsyncVLA.git
 git clone https://github.com/mimi-neoki/AsyncVLA-Runtime.git
 cd AsyncVLA-Runtime
 ```
@@ -60,6 +68,8 @@ Install HailoRT wheel manually on Raspberry Pi 5:
 
 `hailort-5.2.0-cp310-cp310-linux_aarch64.whl` can be obtained from the **Hailo Developer Zone**.
 
+You need to compile model into .hef for inference on Hailo chip 
+
 ## 5. Verify Installation
 
 ### Server environment
@@ -90,12 +100,13 @@ After installing HailoRT wheel:
 PYTHONPATH=. .venv.server/bin/python scripts/run_base_vla_server.py \
   --host 0.0.0.0 \
   --port 8000 \
-  --hf-dir ~/gitrepo/AsyncVLA_release \
-  --asyncvla-repo-dir ~/gitrepo/AsyncVLA \
+  --hf-dir <path to AsyncVLA Huggingface model repository> \
+  --asyncvla-repo-dir <path to AsyncVLA repository> \
   --device cuda \
   --dtype float16 \
-  --quantization 8bit
+
 ```
+If you face a CUDA OOM, you can use ```--quantization 8bit```
 
 ### Start Pi edge client (Raspberry Pi 5)
 
