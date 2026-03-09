@@ -4,15 +4,15 @@ version = "0.1.0"
 description = "Split-inference runtime scaffold for AsyncVLA (workstation + Pi/Hailo)"
 requires-python = ">=3.10,<3.11"
 dependencies = [
-    "torch==2.2.0",
-    "torchvision==0.17.0",
+    # "torch==2.2.0",
+    # "torchvision==0.17.0",
     "transformers @ git+https://github.com/moojink/transformers-openvla-oft.git",
     "accelerate>=0.25.0",
     "tokenizers==0.19.1",
     "sentencepiece==0.1.99",
     "timm==0.9.10",
     "bitsandbytes==0.42.0",
-    "draccus==0.8.0",
+    # "draccus==0.8.0",
     "rich",
     "einops",
     "efficientnet-pytorch==0.7.1",
@@ -23,7 +23,10 @@ dependencies = [
     "pyyaml",
     "requests",
     "opencv-python>=4.11.0.86",
-    "hailort",
+    "hailort", # 0.4.xではnumpy 2.xが必要で、hailortはnumpy 1.xが必要であるため、0.3.3以下のバージョンのみしか対応できない
+    "lerobot",
+    "lerobot[feetech]",
+    "zmq>=0.0.0",
 ]
 
 [tool.uv]
@@ -31,3 +34,4 @@ package = false
 
 [tool.uv.sources]
 hailort = { path = "hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
+lerobot = { path = "/home/pi/gitrepo/lerobot", editable = true }
