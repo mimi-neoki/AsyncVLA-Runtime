@@ -8,6 +8,7 @@ import os
 import shutil
 import sys
 import threading
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -54,7 +55,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=0.0)
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
-    parser.add_argument("--instruction", default="move forward")
+    parser.add_argument(
+        "--instruction-verb",
+        default="move to",
+        help="Verb phrase used for instruction composition (fixed during runtime).",
+    )
+    parser.add_argument(
+        "--instruction-noun",
+        default="the target object",
+        help="Initial target noun phrase. You can update this via stdin while running.",
+    )
     parser.add_argument(
         "--task-mode",
         choices=[
@@ -189,10 +199,21 @@ def _target_pose_from_action(action_step: np.ndarray) -> np.ndarray:
     return np.array([x, y, yaw], dtype=np.float32)
 
 
+def _compose_instruction(verb: str, noun: str) -> str:
+    verb_text = str(verb).strip()
+    noun_text = str(noun).strip()
+    if verb_text and noun_text:
+        return f"{verb_text} {noun_text}"
+    if noun_text:
+        return noun_text
+    return verb_text
+
+
 def _draw_overlay(
     frame_bgr: np.ndarray,
     pose_chunk: np.ndarray,
     cmd: dict[str, float],
+    instruction: str,
     loop_ms: float,
     policy_ms: float,
     edge_ms: float,
@@ -236,11 +257,19 @@ def _draw_overlay(
         draw_text_fit(t, panel_x + 12, y0, (0, 255, 255))
         y0 += 28
 
+    draw_text_fit("inference_instruction:", panel_x + 12, y0, (0, 255, 255))
+    y0 += 26
+    for line in textwrap.wrap(instruction, width=32)[:3]:
+        draw_text_fit(line, panel_x + 12, y0, (180, 255, 180))
+        y0 += 24
+
     # Top-down mini map in side panel
-    map_size = min(260, h - 140)
+    map_y = max(110, y0 + 8)
+    map_size = min(260, h - map_y - 12)
+    map_size = max(120, map_size)
     pad = 12
     x1 = panel_x + (panel_w - map_size) // 2
-    y1 = 110
+    y1 = map_y
     x2 = x1 + map_size
     y2 = y1 + map_size
     cv2.rectangle(vis, (x1, y1), (x2, y2), (30, 30, 30), thickness=-1)
@@ -358,6 +387,7 @@ def main() -> None:
     latest_tokens_ts: int | None = None
     last_policy_ms = 0.0
     last_policy_error: str | None = None
+    current_instruction_noun = args.instruction_noun
 
     writer: cv2.VideoWriter | None = None
     if args.save_video:
@@ -372,7 +402,10 @@ def main() -> None:
         )
 
     print(f"Start demo. policy_url={args.policy_url}, hef={hef_path}")
-    print(f"instruction={args.instruction}")
+    print(f"instruction_verb={args.instruction_verb}")
+    print(f"instruction_noun={args.instruction_noun}")
+    print(f"instruction={_compose_instruction(args.instruction_verb, args.instruction_noun)}")
+    print("Type a new noun phrase and press Enter to update it while running.")
     if args.task_mode is not None:
         print(f"task_mode={args.task_mode}")
     if args.task_id is not None:
@@ -405,15 +438,18 @@ def main() -> None:
         while running.is_set():
             t0 = time.monotonic()
             obs: dict[str, Any] | None
+            instruction_noun: str
             with lock:
                 obs = dict(latest_obs) if latest_obs is not None else None
+                instruction_noun = str(current_instruction_noun)
+            instruction_text = _compose_instruction(args.instruction_verb, instruction_noun)
             if obs is not None:
                 try:
                     frame = np.asarray(obs["front_image"])
                     ts = int(obs["timestamp_ns"])
                     payload = {
                         "timestamp_ns": ts,
-                        "instruction": args.instruction,
+                        "instruction": instruction_text,
                         "goal_pose": np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32).tolist(),
                         "current_pose": np.asarray(obs.get("current_pose", [0, 0, 0]), dtype=np.float32).tolist(),
                         "images": {
@@ -451,10 +487,28 @@ def main() -> None:
                         last_policy_error = str(exc)
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
+    def instruction_input_loop() -> None:
+        nonlocal current_instruction_noun
+        while running.is_set():
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                break
+            if line == "":
+                break
+            text = line.strip()
+            if not text:
+                continue
+            with lock:
+                current_instruction_noun = text
+            print(f"[instruction noun updated] {text}")
+
     capture_thread = threading.Thread(target=capture_loop, name="capture", daemon=True)
     policy_thread = threading.Thread(target=policy_loop, name="policy", daemon=True)
+    instruction_thread = threading.Thread(target=instruction_input_loop, name="instruction_input", daemon=True)
     capture_thread.start()
     policy_thread.start()
+    instruction_thread.start()
 
     edge_period = 1.0 / max(args.loop_hz, 1e-6)
     try:
@@ -470,6 +524,8 @@ def main() -> None:
                 tokens_ts = latest_tokens_ts
                 policy_ms = last_policy_ms
                 policy_err = last_policy_error
+                instruction_noun = str(current_instruction_noun)
+            instruction_text = _compose_instruction(args.instruction_verb, instruction_noun)
 
             error_text = policy_err
             if obs is not None:
@@ -498,7 +554,7 @@ def main() -> None:
                 except Exception as exc:
                     error_text = str(exc)
             lekiwi_action = lekiwi._from_bi_wheel_action_to_base_action(cmd)
-            print(lekiwi_action)
+            # print(lekiwi_action)
             lekiwi.send_action(lekiwi_action)
 
             loop_ms = (time.monotonic() - t0) * 1000.0
@@ -506,6 +562,7 @@ def main() -> None:
                 frame_bgr=current,
                 pose_chunk=pose_chunk,
                 cmd=cmd,
+                instruction=instruction_text,
                 loop_ms=loop_ms,
                 policy_ms=policy_ms,
                 edge_ms=edge_ms,
