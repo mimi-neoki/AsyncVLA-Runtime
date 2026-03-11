@@ -10,6 +10,7 @@ import sys
 import threading
 import textwrap
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,12 +29,140 @@ from lerobot.robots.lekiwi.lekiwi_client import LeKiwiClient
 from lerobot.utils.robot_utils import busy_wait
 
 try:
+    from test_yolo_world_camera import (
+        YoloWorldHailoRunner,
+        YoloWorldHailoRunnerConfig,
+        _build_text_embeddings_with_clip,
+    )
+except Exception:
+    from scripts.test_yolo_world_camera import (
+        YoloWorldHailoRunner,
+        YoloWorldHailoRunnerConfig,
+        _build_text_embeddings_with_clip,
+    )
+
+try:
     import cv2
 except Exception:  # pragma: no cover
     cv2 = None
 
 PANEL_WIDTH = 420
 FPS = 50
+
+
+@dataclass
+class ObjectCheckResult:
+    target_text: str
+    present: bool
+    best_score: float
+    threshold: float
+    infer_ms: float
+    checked_at_monotonic: float
+    error: str | None = None
+
+
+@dataclass
+class StdinObjectCheckerConfig:
+    yolo_hef: str
+    clip_hef: str
+    clip_model_id: str
+    prompt_template: str
+    conf_thres: float
+    iou_thres: float
+    max_det: int
+    timeout_ms: int
+    input_image_name: str | None
+    input_text_name: str | None
+
+
+class StdinObjectChecker:
+    def __init__(self, config: StdinObjectCheckerConfig) -> None:
+        self.config = config
+        self._target_ctx: Any | None = None
+        self._target: Any | None = None
+        self._owns_target = False
+        self._runner: YoloWorldHailoRunner | None = None
+        self._text_embedding_cache: dict[str, np.ndarray] = {}
+
+    def start(self, target: Any | None = None) -> None:
+        from hailo_platform import VDevice
+
+        if target is None:
+            self._target_ctx = VDevice()
+            self._target = self._target_ctx.__enter__()
+            self._owns_target = True
+        else:
+            self._target = target
+            self._owns_target = False
+        self._runner = YoloWorldHailoRunner(
+            target=self._target,
+            config=YoloWorldHailoRunnerConfig(
+                hef_path=self.config.yolo_hef,
+                input_image_name=self.config.input_image_name,
+                input_text_name=self.config.input_text_name,
+                timeout_ms=self.config.timeout_ms,
+            ),
+        )
+        self._runner.__enter__()
+
+    def close(self) -> None:
+        if self._runner is not None:
+            self._runner.__exit__(None, None, None)
+            self._runner = None
+        if self._owns_target and self._target_ctx is not None:
+            self._target_ctx.__exit__(None, None, None)
+            self._target_ctx = None
+        self._target = None
+        self._owns_target = False
+
+    def _text_embedding_for(self, target_text: str) -> np.ndarray:
+        cache_key = target_text.strip().lower()
+        if not cache_key:
+            raise ValueError("Empty target text is not allowed")
+        if cache_key not in self._text_embedding_cache:
+            if self._target is None or self._runner is None:
+                raise RuntimeError("StdinObjectChecker is not started")
+            emb = _build_text_embeddings_with_clip(
+                target=self._target,
+                clip_hef_path=Path(self.config.clip_hef),
+                yolo_infer_model=self._runner.infer_model,
+                yolo_text_input_name=self._runner.text_input_name,
+                class_texts=[target_text],
+                clip_model_id=self.config.clip_model_id,
+                prompt_template=self.config.prompt_template,
+                timeout_ms=self.config.timeout_ms,
+            )
+            self._text_embedding_cache[cache_key] = emb
+        return self._text_embedding_cache[cache_key]
+
+    def check_once(self, frame_bgr: np.ndarray, target_text: str) -> ObjectCheckResult:
+        if self._runner is None:
+            raise RuntimeError("StdinObjectChecker is not started")
+
+        text = target_text.strip()
+        if not text:
+            raise ValueError("Empty target text is not allowed")
+
+        emb = self._text_embedding_for(text)
+        self._runner.set_text_embeddings(emb)
+        _, scores, _, infer_ms = self._runner.infer(
+            frame_bgr=frame_bgr,
+            num_classes=1,
+            conf_thres=0.0,
+            iou_thres=self.config.iou_thres,
+            max_det=self.config.max_det,
+        )
+        best_score = float(np.max(scores)) if scores.size > 0 else 0.0
+        present = best_score >= float(self.config.conf_thres)
+        return ObjectCheckResult(
+            target_text=text,
+            present=present,
+            best_score=best_score,
+            threshold=float(self.config.conf_thres),
+            infer_ms=float(infer_ms),
+            checked_at_monotonic=time.monotonic(),
+            error=None,
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +239,21 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--show", action="store_true", help="Show OpenCV window")
     parser.add_argument("--save-video", default="", help="Optional output video path")
+    parser.add_argument(
+        "--stdin-object-check",
+        action="store_true",
+        help="Run one-shot YOLO-World check when stdin noun phrase is updated.",
+    )
+    parser.add_argument("--yolo-hef", default="models/yolo_world_v2s.hef")
+    parser.add_argument("--clip-hef", default="models/clip_vit_b_32_text_encoder.hef")
+    parser.add_argument("--clip-model-id", default="openai/clip-vit-base-patch32")
+    parser.add_argument("--yolo-prompt-template", default="a photo of {}")
+    parser.add_argument("--yolo-conf-thres", type=float, default=0.50)
+    parser.add_argument("--yolo-iou-thres", type=float, default=0.45)
+    parser.add_argument("--yolo-max-det", type=int, default=100)
+    parser.add_argument("--yolo-timeout-ms", type=int, default=10000)
+    parser.add_argument("--yolo-input-image-name", default=None)
+    parser.add_argument("--yolo-input-text-name", default=None)
 
     parser.add_argument(
         "--libcamerify",
@@ -217,6 +361,10 @@ def _draw_overlay(
     loop_ms: float,
     policy_ms: float,
     edge_ms: float,
+    show_object_check: bool = False,
+    object_check_result: ObjectCheckResult | None = None,
+    object_check_active_target: str | None = None,
+    object_check_pending_target: str | None = None,
     error_text: str | None = None,
 ) -> np.ndarray:
     if cv2 is None:
@@ -262,6 +410,37 @@ def _draw_overlay(
     for line in textwrap.wrap(instruction, width=32)[:3]:
         draw_text_fit(line, panel_x + 12, y0, (180, 255, 180))
         y0 += 24
+
+    if show_object_check:
+        draw_text_fit("stdin_object_check:", panel_x + 12, y0, (0, 255, 255))
+        y0 += 24
+        if object_check_active_target:
+            draw_text_fit(f"running: {object_check_active_target}", panel_x + 12, y0, (0, 200, 255))
+            y0 += 22
+        elif object_check_pending_target:
+            draw_text_fit(f"queued: {object_check_pending_target}", panel_x + 12, y0, (0, 200, 255))
+            y0 += 22
+
+        if object_check_result is not None:
+            target_line = f"last target: {object_check_result.target_text}"
+            for line in textwrap.wrap(target_line, width=32)[:2]:
+                draw_text_fit(line, panel_x + 12, y0, (180, 255, 180))
+                y0 += 22
+            if object_check_result.error:
+                draw_text_fit("last result: ERROR", panel_x + 12, y0, (0, 120, 255))
+                y0 += 22
+            else:
+                status_text = "FOUND" if object_check_result.present else "NOT FOUND"
+                status_color = (80, 255, 120) if object_check_result.present else (80, 120, 255)
+                draw_text_fit(f"last result: {status_text}", panel_x + 12, y0, status_color)
+                y0 += 22
+                draw_text_fit(
+                    f"score={object_check_result.best_score:.2f} th={object_check_result.threshold:.2f}",
+                    panel_x + 12,
+                    y0,
+                    (220, 220, 220),
+                )
+                y0 += 22
 
     # Top-down mini map in side panel
     map_y = max(110, y0 + 8)
@@ -355,6 +534,14 @@ def main() -> None:
     lekiwi_config = LeKiwiClientConfig(remote_ip="127.0.0.1", id="my_lekiwi", has_arm=False)
     lekiwi = LeKiwiClient(lekiwi_config)
 
+    shared_hailo_target_ctx: Any | None = None
+    shared_hailo_target: Any | None = None
+    if args.stdin_object_check:
+        from hailo_platform import VDevice
+
+        shared_hailo_target_ctx = VDevice()
+        shared_hailo_target = shared_hailo_target_ctx.__enter__()
+
     edge_runner = HailoEdgeRunner(
         HailoEdgeRunnerConfig(
             hef_path=str(hef_path),
@@ -372,7 +559,8 @@ def main() -> None:
             output_format_type=args.output_format,
             normalize_imagenet=args.normalize_imagenet,
             image_scale_255=args.image_scale_255,
-        )
+        ),
+        target=shared_hailo_target,
     )
 
     ring = ImageRingBuffer(capacity=args.ring_capacity)
@@ -380,6 +568,7 @@ def main() -> None:
     max_delta_ns = int(args.nearest_frame_max_delta_ms * 1e6)
 
     lock = threading.Lock()
+    hailo_lock = threading.Lock()
     running = threading.Event()
     running.set()
     latest_obs: dict[str, Any] | None = None
@@ -388,6 +577,33 @@ def main() -> None:
     last_policy_ms = 0.0
     last_policy_error: str | None = None
     current_instruction_noun = args.instruction_noun
+    pending_object_check_noun: str | None = None
+    active_object_check_noun: str | None = None
+    last_object_check_result: ObjectCheckResult | None = None
+
+    object_checker: StdinObjectChecker | None = None
+    if args.stdin_object_check:
+        yolo_hef = Path(args.yolo_hef).expanduser().resolve()
+        clip_hef = Path(args.clip_hef).expanduser().resolve()
+        if not yolo_hef.exists():
+            raise FileNotFoundError(f"YOLO HEF not found: {yolo_hef}")
+        if not clip_hef.exists():
+            raise FileNotFoundError(f"CLIP HEF not found: {clip_hef}")
+        object_checker = StdinObjectChecker(
+            StdinObjectCheckerConfig(
+                yolo_hef=str(yolo_hef),
+                clip_hef=str(clip_hef),
+                clip_model_id=args.clip_model_id,
+                prompt_template=args.yolo_prompt_template,
+                conf_thres=args.yolo_conf_thres,
+                iou_thres=args.yolo_iou_thres,
+                max_det=args.yolo_max_det,
+                timeout_ms=args.yolo_timeout_ms,
+                input_image_name=args.yolo_input_image_name,
+                input_text_name=args.yolo_input_text_name,
+            )
+        )
+        object_checker.start(target=shared_hailo_target)
 
     writer: cv2.VideoWriter | None = None
     if args.save_video:
@@ -406,6 +622,11 @@ def main() -> None:
     print(f"instruction_noun={args.instruction_noun}")
     print(f"instruction={_compose_instruction(args.instruction_verb, args.instruction_noun)}")
     print("Type a new noun phrase and press Enter to update it while running.")
+    if args.stdin_object_check:
+        print(
+            "stdin_object_check=enabled "
+            f"(conf_thres={args.yolo_conf_thres:.2f}, iou_thres={args.yolo_iou_thres:.2f})"
+        )
     if args.task_mode is not None:
         print(f"task_mode={args.task_mode}")
     if args.task_id is not None:
@@ -488,7 +709,7 @@ def main() -> None:
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     def instruction_input_loop() -> None:
-        nonlocal current_instruction_noun
+        nonlocal current_instruction_noun, pending_object_check_noun
         while running.is_set():
             try:
                 line = sys.stdin.readline()
@@ -501,14 +722,65 @@ def main() -> None:
                 continue
             with lock:
                 current_instruction_noun = text
-            print(f"[instruction noun updated] {text}")
+                if args.stdin_object_check:
+                    pending_object_check_noun = text
+            if args.stdin_object_check:
+                print(f"[instruction noun updated] {text} (object check queued)")
+            else:
+                print(f"[instruction noun updated] {text}")
+
+    def object_check_loop() -> None:
+        nonlocal pending_object_check_noun, active_object_check_noun, last_object_check_result
+        if object_checker is None:
+            return
+        while running.is_set():
+            target_text: str | None = None
+            frame_bgr: np.ndarray | None = None
+            with lock:
+                if pending_object_check_noun is not None and latest_obs is not None and active_object_check_noun is None:
+                    target_text = str(pending_object_check_noun)
+                    pending_object_check_noun = None
+                    active_object_check_noun = target_text
+                    frame_bgr = np.asarray(latest_obs["front_image"]).copy()
+            if target_text is None or frame_bgr is None:
+                time.sleep(0.02)
+                continue
+
+            try:
+                with hailo_lock:
+                    result = object_checker.check_once(frame_bgr=frame_bgr, target_text=target_text)
+                print(
+                    "[stdin object check] "
+                    f"target='{result.target_text}' present={result.present} "
+                    f"best_score={result.best_score:.3f} th={result.threshold:.3f} infer_ms={result.infer_ms:.1f}"
+                )
+            except Exception as exc:
+                result = ObjectCheckResult(
+                    target_text=target_text,
+                    present=False,
+                    best_score=0.0,
+                    threshold=args.yolo_conf_thres,
+                    infer_ms=0.0,
+                    checked_at_monotonic=time.monotonic(),
+                    error=str(exc),
+                )
+                print(f"[stdin object check error] target='{target_text}' error={exc}")
+
+            with lock:
+                last_object_check_result = result
+                active_object_check_noun = None
 
     capture_thread = threading.Thread(target=capture_loop, name="capture", daemon=True)
     policy_thread = threading.Thread(target=policy_loop, name="policy", daemon=True)
     instruction_thread = threading.Thread(target=instruction_input_loop, name="instruction_input", daemon=True)
+    object_check_thread: threading.Thread | None = None
+    if object_checker is not None:
+        object_check_thread = threading.Thread(target=object_check_loop, name="object_check", daemon=True)
     capture_thread.start()
     policy_thread.start()
     instruction_thread.start()
+    if object_check_thread is not None:
+        object_check_thread.start()
 
     edge_period = 1.0 / max(args.loop_hz, 1e-6)
     try:
@@ -525,6 +797,9 @@ def main() -> None:
                 policy_ms = last_policy_ms
                 policy_err = last_policy_error
                 instruction_noun = str(current_instruction_noun)
+                object_check_result = last_object_check_result
+                object_check_active = active_object_check_noun
+                object_check_pending = pending_object_check_noun
             instruction_text = _compose_instruction(args.instruction_verb, instruction_noun)
 
             error_text = policy_err
@@ -539,12 +814,13 @@ def main() -> None:
                     if delayed is None:
                         raise RuntimeError("No delayed frame in ring buffer for echoed timestamp")
                     t_edge = time.monotonic()
-                    raw_out = edge_runner.infer(
-                        current_image=current,
-                        delayed_image=delayed.frame,
-                        projected_tokens=tokens,
-                        goal_pose=np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32),
-                    )
+                    with hailo_lock:
+                        raw_out = edge_runner.infer(
+                            current_image=current,
+                            delayed_image=delayed.frame,
+                            projected_tokens=tokens,
+                            goal_pose=np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32),
+                        )
                     edge_ms = (time.monotonic() - t_edge) * 1000.0
                     pose_chunk = _pose_chunk_to_matrix(raw_out)
                     target_pose = _target_pose_from_action(pose_chunk[0])
@@ -566,6 +842,10 @@ def main() -> None:
                 loop_ms=loop_ms,
                 policy_ms=policy_ms,
                 edge_ms=edge_ms,
+                show_object_check=args.stdin_object_check,
+                object_check_result=object_check_result,
+                object_check_active_target=object_check_active,
+                object_check_pending_target=object_check_pending,
                 error_text=error_text,
             )
 
@@ -583,9 +863,17 @@ def main() -> None:
         running.clear()
         capture_thread.join(timeout=1.0)
         policy_thread.join(timeout=1.0)
+        instruction_thread.join(timeout=1.0)
+        if object_check_thread is not None:
+            object_check_thread.join(timeout=5.0)
+        edge_runner.close()
         robot.disconnect()
         lekiwi.send_action({"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.0})
         lekiwi.disconnect()
+        if object_checker is not None:
+            object_checker.close()
+        if shared_hailo_target_ctx is not None:
+            shared_hailo_target_ctx.__exit__(None, None, None)
         if writer is not None:
             writer.release()
         if args.show and cv2 is not None:
