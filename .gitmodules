@@ -1,0 +1,4 @@
+[submodule "lib/lerobot"]
+	path = lib/lerobot
+	url = https://github.com/kmkmkr/lerobot-0.3.3-lekiwi-base-only.git
+	branch = lekiwi-base-only

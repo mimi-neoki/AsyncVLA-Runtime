@@ -18,7 +18,7 @@ server = [
     "sentencepiece==0.1.99",
     "timm==0.9.10",
     "bitsandbytes==0.42.0",
-    "draccus==0.8.0",
+    "draccus==0.10.0",
     "rich",
     "einops",
     "efficientnet-pytorch==0.7.1",
@@ -29,6 +29,7 @@ server = [
 ]
 client = [
     "opencv-python>=4.11.0.86",
+    "lerobot[lekiwi]",
 ]
 test = [
     "pytest>=8.0.0",
@@ -36,3 +37,12 @@ test = [
 
 [tool.uv]
 package = false
+conflicts = [
+    [
+        { extra = "server" },
+        { extra = "client" },
+    ],
+]
+
+[tool.uv.sources]
+lerobot = { path = "lib/lerobot", editable = true }
