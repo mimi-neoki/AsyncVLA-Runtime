@@ -23,7 +23,7 @@ dependencies = [
     "pyyaml",
     "requests",
     "opencv-python>=4.11.0.86",
-    "hailort", # 0.4.xではnumpy 2.xが必要で、hailortはnumpy 1.xが必要であるため、0.3.3以下のバージョンのみしか対応できない
+    "hailort",
     "lerobot",
     "lerobot[feetech]",
     "zmq>=0.0.0",
@@ -34,4 +34,4 @@ package = false
 
 [tool.uv.sources]
 hailort = { path = "hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
-lerobot = { path = "/home/pi/gitrepo/lerobot", editable = true }
+lerobot = { path = "lib/lerobot", editable = true }
