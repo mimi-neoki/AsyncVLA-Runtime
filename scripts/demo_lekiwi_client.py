@@ -48,6 +48,8 @@ except Exception:  # pragma: no cover
 
 PANEL_WIDTH = 420
 FPS = 50
+ROTATE_IN_PLACE_ACTION = {"x.vel": 0.0, "y.vel": 0.0, "theta.vel": 0.1}
+DEFAULT_OBJECT_CHECK_INTERVAL_SEC = 0.30
 
 
 @dataclass
@@ -254,6 +256,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-timeout-ms", type=int, default=10000)
     parser.add_argument("--yolo-input-image-name", default=None)
     parser.add_argument("--yolo-input-text-name", default=None)
+    parser.add_argument(
+        "--stdin-object-check-mode",
+        choices=["not_found_only", "always"],
+        default="not_found_only",
+        help=(
+            "Object check scheduling mode: "
+            "'not_found_only' checks periodically only while target is NOT FOUND; "
+            "'always' checks periodically regardless of current FOUND/NOT FOUND state."
+        ),
+    )
+    parser.add_argument(
+        "--stdin-object-check-interval-sec",
+        type=float,
+        default=DEFAULT_OBJECT_CHECK_INTERVAL_SEC,
+        help="Interval for periodic object checks when periodic scheduling is active.",
+    )
 
     parser.add_argument(
         "--libcamerify",
@@ -580,6 +598,7 @@ def main() -> None:
     pending_object_check_noun: str | None = None
     active_object_check_noun: str | None = None
     last_object_check_result: ObjectCheckResult | None = None
+    rotate_on_missing_target = False
 
     object_checker: StdinObjectChecker | None = None
     if args.stdin_object_check:
@@ -625,7 +644,10 @@ def main() -> None:
     if args.stdin_object_check:
         print(
             "stdin_object_check=enabled "
-            f"(conf_thres={args.yolo_conf_thres:.2f}, iou_thres={args.yolo_iou_thres:.2f})"
+            f"(conf_thres={args.yolo_conf_thres:.2f}, "
+            f"iou_thres={args.yolo_iou_thres:.2f}, "
+            f"mode={args.stdin_object_check_mode}, "
+            f"interval={args.stdin_object_check_interval_sec:.2f}s)"
         )
     if args.task_mode is not None:
         print(f"task_mode={args.task_mode}")
@@ -730,13 +752,29 @@ def main() -> None:
                 print(f"[instruction noun updated] {text}")
 
     def object_check_loop() -> None:
-        nonlocal pending_object_check_noun, active_object_check_noun, last_object_check_result
+        nonlocal pending_object_check_noun, active_object_check_noun, last_object_check_result, rotate_on_missing_target
         if object_checker is None:
             return
+        check_interval_sec = max(0.02, float(args.stdin_object_check_interval_sec))
+        next_recheck_at = 0.0
         while running.is_set():
             target_text: str | None = None
             frame_bgr: np.ndarray | None = None
             with lock:
+                now = time.monotonic()
+                periodic_check_enabled = (
+                    args.stdin_object_check_mode == "always"
+                    or rotate_on_missing_target
+                )
+                if (
+                    periodic_check_enabled
+                    and pending_object_check_noun is None
+                    and active_object_check_noun is None
+                    and latest_obs is not None
+                    and now >= next_recheck_at
+                ):
+                    pending_object_check_noun = str(current_instruction_noun)
+                    next_recheck_at = now + check_interval_sec
                 if pending_object_check_noun is not None and latest_obs is not None and active_object_check_noun is None:
                     target_text = str(pending_object_check_noun)
                     pending_object_check_noun = None
@@ -769,6 +807,9 @@ def main() -> None:
             with lock:
                 last_object_check_result = result
                 active_object_check_noun = None
+                rotate_on_missing_target = bool(result.error) or (not result.present)
+                if args.stdin_object_check_mode == "not_found_only" and (not rotate_on_missing_target):
+                    next_recheck_at = 0.0
 
     capture_thread = threading.Thread(target=capture_loop, name="capture", daemon=True)
     policy_thread = threading.Thread(target=policy_loop, name="policy", daemon=True)
@@ -800,6 +841,7 @@ def main() -> None:
                 object_check_result = last_object_check_result
                 object_check_active = active_object_check_noun
                 object_check_pending = pending_object_check_noun
+                should_rotate = rotate_on_missing_target
             instruction_text = _compose_instruction(args.instruction_verb, instruction_noun)
 
             error_text = policy_err
@@ -808,7 +850,13 @@ def main() -> None:
             else:
                 current = np.zeros((args.camera_height, args.camera_width, 3), dtype=np.uint8)
 
-            if obs is not None and tokens is not None and tokens_ts is not None:
+            if should_rotate:
+                cmd = {"linear": 0.0, "angular": 0.05}
+                if object_check_result is not None:
+                    error_text = f"target not found: {object_check_result.target_text} -> rotate in place"
+                else:
+                    error_text = "target not found -> rotate in place"
+            elif obs is not None and tokens is not None and tokens_ts is not None:
                 try:
                     delayed = ring.nearest(tokens_ts, max_delta_ns=max_delta_ns)
                     if delayed is None:
@@ -829,9 +877,12 @@ def main() -> None:
     
                 except Exception as exc:
                     error_text = str(exc)
-            lekiwi_action = lekiwi._from_bi_wheel_action_to_base_action(cmd)
-            # print(lekiwi_action)
-            lekiwi.send_action(lekiwi_action)
+            if should_rotate:
+                lekiwi.send_action(ROTATE_IN_PLACE_ACTION)
+            else:
+                lekiwi_action = lekiwi._from_bi_wheel_action_to_base_action(cmd)
+                # print(lekiwi_action)
+                lekiwi.send_action(lekiwi_action)
 
             loop_ms = (time.monotonic() - t0) * 1000.0
             vis = _draw_overlay(
@@ -857,8 +908,8 @@ def main() -> None:
                 if key in (27, ord("q")):
                     break
             time.sleep(max(0.0, edge_period - (time.monotonic() - t0)))
-    except KeyboardInterrupt:
-        pass
+    # except KeyboardInterrupt:
+    #     pass
     finally:
         running.clear()
         capture_thread.join(timeout=1.0)

@@ -42,6 +42,7 @@ class HailoEdgeRunner:
         self,
         config: HailoEdgeRunnerConfig,
         fallback_fn: Callable[[dict[str, np.ndarray]], np.ndarray] | None = None,
+        target: Any | None = None,
     ) -> None:
         self.config = config
         self.fallback_fn = fallback_fn
@@ -49,7 +50,8 @@ class HailoEdgeRunner:
         self._network_group: Any = None
         self._network_group_params: Any = None
         self._infer_pipeline: Any = None
-        self._target: Any = None
+        self._target: Any = target
+        self._owns_target = target is None
         self._infer_model: Any = None
         self._configured_infer_model: Any = None
         self._mode: str = "vstreams"
@@ -153,8 +155,11 @@ class HailoEdgeRunner:
 
         hef_path = str(Path(self.config.hef_path).expanduser().resolve())
         hef = HEF(hef_path)
-        target = VDevice()
-        self._target = target
+        target = self._target
+        if target is None:
+            target = VDevice()
+            self._target = target
+            self._owns_target = True
 
         # Preferred path: VStreams. Some Hailo10H + HEF combinations may raise
         # HAILO_NOT_IMPLEMENTED on configure, so fallback to InferModel API.
@@ -245,3 +250,13 @@ class HailoEdgeRunner:
         if output.ndim != 3:
             output = output.reshape(1, self.config.chunk_size, self.config.pose_dim)
         return output
+
+    def close(self) -> None:
+        self._network_group = None
+        self._network_group_params = None
+        self._infer_pipeline = None
+        self._infer_model = None
+        self._configured_infer_model = None
+        self._ready = False
+        if self._owns_target:
+            self._target = None
