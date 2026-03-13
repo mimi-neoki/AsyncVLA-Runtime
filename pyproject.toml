@@ -29,7 +29,11 @@ server = [
 ]
 client = [
     "opencv-python>=4.11.0.86",
+    "lerobot",
+    "lerobot[feetech]",
     "lerobot[lekiwi]",
+    "transformers",
+    "hailort"
 ]
 test = [
     "pytest>=8.0.0",
@@ -46,3 +50,4 @@ conflicts = [
 
 [tool.uv.sources]
 lerobot = { path = "lib/lerobot", editable = true }
+hailort = { path = "hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
