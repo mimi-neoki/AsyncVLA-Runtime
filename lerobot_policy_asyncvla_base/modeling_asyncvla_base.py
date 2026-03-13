@@ -147,7 +147,7 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
     def __init__(self, config: AsyncVLABasePolicyConfig) -> None:
         super().__init__()
         self.config = config
-        self.device = torch.device(config.device if torch.cuda.is_available() else "cpu")
+        self.device = self._resolve_device(config.device)
         self.dtype = self._resolve_dtype(config.dtype)
         self.quantization_mode = self._resolve_quantization_mode(config.quantization)
         self.snapshot_dir = self.config.resolve_snapshot_dir()
@@ -174,6 +174,24 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
     def from_snapshot(cls, snapshot_dir: str, **kwargs: Any) -> "AsyncVLABasePolicy":
         cfg = AsyncVLABasePolicyConfig(snapshot_dir=snapshot_dir, **kwargs)
         return cls(cfg)
+
+    def _resolve_device(self, requested: str | None) -> torch.device:
+        normalized = str(requested or "auto").strip().lower()
+        has_mps = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+
+        if normalized == "auto":
+            if torch.cuda.is_available():
+                return torch.device("cuda")
+            if has_mps:
+                return torch.device("mps")
+            return torch.device("cpu")
+
+        device = torch.device(normalized)
+        if device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available. Use --device mps or --device cpu.")
+        if device.type == "mps" and not has_mps:
+            raise RuntimeError("MPS is not available. Use --device cuda or --device cpu.")
+        return device
 
     def _resolve_dtype(self, dtype_name: str) -> torch.dtype:
         dtype = getattr(torch, dtype_name, torch.float16)
