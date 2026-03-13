@@ -28,20 +28,19 @@ git clone https://github.com/mimi-neoki/AsyncVLA-Runtime.git
 cd AsyncVLA-Runtime
 ```
 
-## 3. Environment Setup with `uv` Extras
+## 3. Environment Setup with `uv`
 
-This project uses extras to separate dependencies:
+This repository is split into two `uv` projects:
 
-- `server`: base VLA server runtime
-- `client`: Pi edge runtime
-- `test`: test tooling
+- Root project (`./pyproject.toml`): server runtime (`server`, `test` extras)
+- Client project (`./client/pyproject.toml`): Pi edge runtime (`lerobot`, `hailort`, etc.)
 
 ### Option A: Single environment (quick switching)
 
 ```bash
 uv sync --extra server --extra test
 # ... work on server
-uv sync --extra client
+uv sync --project client
 # ... work on client
 ```
 
@@ -49,7 +48,7 @@ uv sync --extra client
 
 ```bash
 UV_PROJECT_ENVIRONMENT=.venv.server uv sync --extra server --extra test
-UV_PROJECT_ENVIRONMENT=.venv.client uv sync --extra client
+UV_PROJECT_ENVIRONMENT=.venv.client uv sync --project client
 ```
 
 Then use the corresponding Python interpreter for each side:
@@ -59,8 +58,14 @@ Then use the corresponding Python interpreter for each side:
 
 ## 4. Raspberry Pi 5 + HailoRT Setup
 
-The client extra intentionally does **not** pin a local Hailo wheel file in `pyproject.toml`.
-Install HailoRT wheel manually on Raspberry Pi 5:
+The client project references a local HailoRT wheel path in `client/pyproject.toml`:
+
+```toml
+hailort = { path = "../hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
+```
+
+Place the wheel in the repository root before syncing the client project.
+If you already created `.venv.client` without it, you can also install manually:
 
 ```bash
 .venv.client/bin/pip install hailort-5.2.0-cp310-cp310-linux_aarch64.whl
@@ -82,7 +87,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv.server/bin/pytest -q
 ### Client environment
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venv.client uv sync --extra client
+UV_PROJECT_ENVIRONMENT=.venv.client uv sync --project client
 .venv.client/bin/python -c "import cv2; print(cv2.__version__)"
 ```
 
@@ -106,6 +111,7 @@ PYTHONPATH=. .venv.server/bin/python scripts/run_base_vla_server.py \
   --dtype float16 \
 
 ```
+On MacBook GPU, use `--device mps` instead of `--device cuda`.
 If you face a CUDA OOM, you can use ```--quantization 8bit```
 
 ### Start Pi edge client (Raspberry Pi 5)
@@ -121,4 +127,3 @@ Optional language/task overrides can be sent from client:
 ```bash
 --instruction "go to the target" --task-mode language_and_pose --task-id 8
 ```
-

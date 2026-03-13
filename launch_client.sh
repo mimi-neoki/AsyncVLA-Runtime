@@ -21,7 +21,7 @@ echo "Mode=not_found_only: periodic check only while NOT FOUND."
 echo "Mode=always: periodic check always runs regardless of FOUND/NOT FOUND."
 echo "If NOT FOUND, LeKiwi rotates in place until FOUND."
 
-uv run scripts/demo_lekiwi_client.py \
+uv run --project client scripts/demo_lekiwi_client.py \
     --policy-url http://0.0.0.0:8000/infer \
     --hef models/edge_adapter_v520.hef \
     --instruction-verb "move to" \

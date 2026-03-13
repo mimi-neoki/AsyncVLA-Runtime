@@ -1,0 +1,22 @@
+[project]
+name = "asyncvla-runtime-client"
+version = "0.1.0"
+description = "Client runtime environment for AsyncVLA (Raspberry Pi + Hailo)"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "numpy<2",
+    "requests",
+    "opencv-python>=4.11.0.86",
+    "lerobot",
+    "lerobot[feetech]",
+    "lerobot[lekiwi]",
+    "transformers",
+    "hailort",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+lerobot = { path = "../lib/lerobot", editable = true }
+hailort = { path = "../hailort-5.2.0-cp310-cp310-linux_aarch64.whl" }
