@@ -55,6 +55,11 @@ class HailoEdgeRunner:
         self._infer_model: Any = None
         self._configured_infer_model: Any = None
         self._mode: str = "vstreams"
+        self._resolved_input_current_name: str = config.input_current_image
+        self._resolved_input_delayed_name: str = config.input_delayed_image
+        self._resolved_input_tokens_name: str = config.input_projected_tokens
+        self._resolved_input_goal_name: str | None = config.input_goal_pose
+        self._resolved_output_name: str = config.output_action_chunk
 
     def _resize(self, image: np.ndarray) -> np.ndarray:
         if cv2 is not None:
@@ -134,6 +139,51 @@ class HailoEdgeRunner:
             return format_enum.AUTO
         raise ValueError(f"Unsupported format type: {format_type_name}")
 
+    @staticmethod
+    def _resolve_stream_name(requested_name: str | None, available_names: list[str]) -> str | None:
+        if requested_name is None:
+            return None
+        if not available_names:
+            return requested_name
+        if requested_name in available_names:
+            return requested_name
+        requested_leaf = requested_name.split("/")[-1]
+        leaf_matches = [name for name in available_names if name.split("/")[-1] == requested_leaf]
+        if len(leaf_matches) == 1:
+            return leaf_matches[0]
+        if len(leaf_matches) > 1:
+            # deterministic choice for ambiguous matches
+            return sorted(leaf_matches)[0]
+        return requested_name
+
+    def _resolve_stream_names(self, available_inputs: list[str], available_outputs: list[str]) -> None:
+        self._resolved_input_current_name = self._resolve_stream_name(
+            self.config.input_current_image, available_inputs
+        ) or self.config.input_current_image
+        self._resolved_input_delayed_name = self._resolve_stream_name(
+            self.config.input_delayed_image, available_inputs
+        ) or self.config.input_delayed_image
+        self._resolved_input_tokens_name = self._resolve_stream_name(
+            self.config.input_projected_tokens, available_inputs
+        ) or self.config.input_projected_tokens
+        self._resolved_input_goal_name = self._resolve_stream_name(
+            self.config.input_goal_pose, available_inputs
+        )
+        self._resolved_output_name = self._resolve_stream_name(
+            self.config.output_action_chunk, available_outputs
+        ) or self.config.output_action_chunk
+
+    def _map_input_name(self, logical_name: str) -> str:
+        if logical_name == self.config.input_current_image:
+            return self._resolved_input_current_name
+        if logical_name == self.config.input_delayed_image:
+            return self._resolved_input_delayed_name
+        if logical_name == self.config.input_projected_tokens:
+            return self._resolved_input_tokens_name
+        if self.config.input_goal_pose and logical_name == self.config.input_goal_pose:
+            return self._resolved_input_goal_name or logical_name
+        return logical_name
+
     def _init_hailo(self) -> None:
         if self._ready:
             return
@@ -171,6 +221,9 @@ class HailoEdgeRunner:
             output_format_type = self._resolve_format_type(self.config.output_format_type, FormatType)
             input_params = InputVStreamParams.make(network_group, format_type=input_format_type)
             output_params = OutputVStreamParams.make(network_group, format_type=output_format_type)
+            available_inputs = list(input_params.keys()) if hasattr(input_params, "keys") else []
+            available_outputs = list(output_params.keys()) if hasattr(output_params, "keys") else []
+            self._resolve_stream_names(available_inputs, available_outputs)
             infer_pipeline = InferVStreams(network_group, input_params, output_params)
 
             self._network_group = network_group
@@ -189,6 +242,7 @@ class HailoEdgeRunner:
         configured = infer_model.configure()
         self._infer_model = infer_model
         self._configured_infer_model = configured
+        self._resolve_stream_names(list(infer_model.input_names), list(infer_model.output_names))
         self._mode = "infer_model"
         self._ready = True
 
@@ -217,9 +271,12 @@ class HailoEdgeRunner:
 
         self._init_hailo()
         if self._mode == "vstreams":
+            mapped_inputs = {self._map_input_name(name): value for name, value in inputs.items()}
             with self._network_group.activate(self._network_group_params):
-                output_dict = self._infer_pipeline.infer(inputs)
-            if self.config.output_action_chunk in output_dict:
+                output_dict = self._infer_pipeline.infer(mapped_inputs)
+            if self._resolved_output_name in output_dict:
+                output = output_dict[self._resolved_output_name]
+            elif self.config.output_action_chunk in output_dict:
                 output = output_dict[self.config.output_action_chunk]
             else:
                 output = next(iter(output_dict.values()))
@@ -228,11 +285,14 @@ class HailoEdgeRunner:
             bindings = configured.create_bindings()
 
             for name, value in inputs.items():
-                expected_shape = tuple(self._infer_model.input(name).shape)
+                resolved_name = self._map_input_name(name)
+                expected_shape = tuple(self._infer_model.input(resolved_name).shape)
                 arr = self._align_rank_for_infer_model(np.asarray(value), expected_rank=len(expected_shape))
-                bindings.input(name).set_buffer(arr)
+                bindings.input(resolved_name).set_buffer(arr)
 
-            output_name = self.config.output_action_chunk
+            output_name = self._resolved_output_name
+            if output_name not in self._infer_model.output_names and self.config.output_action_chunk in self._infer_model.output_names:
+                output_name = self.config.output_action_chunk
             if output_name not in self._infer_model.output_names:
                 output_name = self._infer_model.output_names[0]
             out_shape = tuple(self._infer_model.output(output_name).shape)
