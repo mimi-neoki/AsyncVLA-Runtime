@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=0.0)
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
+    parser.add_argument("--metric-waypoint-spacing", type=float, default=0.1)
     parser.add_argument("--instruction", default=None, help="Language instruction sent to base-VLA server.")
     parser.add_argument(
         "--task-mode",
@@ -200,6 +201,7 @@ def main() -> None:
             camera_hz=args.camera_fps,
             edge_hz=args.edge_hz,
             policy_hz=args.policy_hz,
+            metric_waypoint_spacing=args.metric_waypoint_spacing,
         ),
     )
 
@@ -214,6 +216,7 @@ def main() -> None:
         print(f"task_id={args.task_id}")
     if args.satellite is not None:
         print(f"satellite={args.satellite}")
+    print(f"metric_waypoint_spacing={args.metric_waypoint_spacing}")
     print(
         f"inputs(current, delayed, tokens)=({args.input_current_name}, {args.input_delayed_name}, {args.input_tokens_name}), "
         f"output={args.output_chunk_name}"

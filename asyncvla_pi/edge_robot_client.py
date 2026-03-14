@@ -12,6 +12,7 @@ import numpy as np
 from .hailo_edge_runner import HailoEdgeRunner
 from .image_ring_buffer import ImageRingBuffer
 from .pd_controller import PDController
+from .policy_payload import build_policy_payload
 
 try:
     import cv2
@@ -46,6 +47,7 @@ class EdgeRobotClientConfig:
     ring_capacity: int = 256
     nearest_frame_max_delta_ms: float = 250.0
     jpeg_quality: int = 85
+    metric_waypoint_spacing: float = 0.1
 
 
 @dataclass
@@ -137,34 +139,30 @@ class EdgeAwareRobotClient:
 
     def _build_policy_payload(self, observation: dict[str, Any]) -> dict[str, Any]:
         image = self._extract_image(observation)
-        payload = {
-            self.config.timestamp_key: int(observation.get(self.config.timestamp_key, time.monotonic_ns())),
-            self.config.goal_pose_key: np.asarray(observation.get(self.config.goal_pose_key, [0, 0, 0]), dtype=np.float32).tolist(),
-            self.config.current_pose_key: np.asarray(observation.get(self.config.current_pose_key, [0, 0, 0]), dtype=np.float32).tolist(),
-            "images": {
-                self.config.image_key: {
-                    "encoding": "jpeg_base64",
-                    "data": self._encode_image(image),
-                    "shape": list(image.shape),
-                }
-            },
-        }
         instruction = observation.get(self.config.instruction_key, self.config.default_instruction)
-        if instruction is not None:
-            payload[self.config.instruction_key] = str(instruction)
-
         task_mode = observation.get(self.config.task_mode_key, self.config.default_task_mode)
-        if task_mode is not None:
-            payload[self.config.task_mode_key] = task_mode
-
         task_id = observation.get(self.config.task_id_key, self.config.default_task_id)
-        if task_id is not None:
-            payload[self.config.task_id_key] = int(task_id)
-
         satellite = observation.get(self.config.satellite_key, self.config.default_satellite)
-        if satellite is not None:
-            payload[self.config.satellite_key] = bool(satellite)
-        return payload
+        return build_policy_payload(
+            image=image,
+            encoded_image=self._encode_image(image),
+            timestamp_ns=int(observation.get(self.config.timestamp_key, time.monotonic_ns())),
+            current_pose=observation.get(self.config.current_pose_key, [0, 0, 0]),
+            goal_pose=observation.get(self.config.goal_pose_key),
+            instruction=instruction,
+            task_mode=task_mode,
+            task_id=task_id,
+            satellite=satellite,
+            image_key=self.config.image_key,
+            timestamp_key=self.config.timestamp_key,
+            current_pose_key=self.config.current_pose_key,
+            goal_pose_key=self.config.goal_pose_key,
+            instruction_key=self.config.instruction_key,
+            task_mode_key=self.config.task_mode_key,
+            task_id_key=self.config.task_id_key,
+            satellite_key=self.config.satellite_key,
+            metric_waypoint_spacing=self.config.metric_waypoint_spacing,
+        )
 
     def _policy_loop(self) -> None:
         period = 1.0 / max(self.config.policy_hz, 1e-6)

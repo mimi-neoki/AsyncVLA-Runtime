@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from asyncvla_pi import HailoEdgeRunner, HailoEdgeRunnerConfig, ImageRingBuffer, PDController, PDControllerConfig
+from asyncvla_pi.policy_payload import build_policy_payload
 from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig
 
 from lerobot.robots.lekiwi.config_lekiwi import LeKiwiClientConfig
@@ -186,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=0.0)
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
+    parser.add_argument("--metric-waypoint-spacing", type=float, default=0.1)
     parser.add_argument(
         "--instruction-verb",
         default="move to",
@@ -640,6 +642,7 @@ def main() -> None:
     print(f"instruction_verb={args.instruction_verb}")
     print(f"instruction_noun={args.instruction_noun}")
     print(f"instruction={_compose_instruction(args.instruction_verb, args.instruction_noun)}")
+    print(f"metric_waypoint_spacing={args.metric_waypoint_spacing}")
     print("Type a new noun phrase and press Enter to update it while running.")
     if args.stdin_object_check:
         print(
@@ -690,25 +693,18 @@ def main() -> None:
                 try:
                     frame = np.asarray(obs["front_image"])
                     ts = int(obs["timestamp_ns"])
-                    payload = {
-                        "timestamp_ns": ts,
-                        "instruction": instruction_text,
-                        "goal_pose": np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32).tolist(),
-                        "current_pose": np.asarray(obs.get("current_pose", [0, 0, 0]), dtype=np.float32).tolist(),
-                        "images": {
-                            "front_image": {
-                                "encoding": "jpeg_base64",
-                                "data": _encode_jpeg_base64(frame, args.jpeg_quality),
-                                "shape": list(frame.shape),
-                            }
-                        },
-                    }
-                    if args.task_mode is not None:
-                        payload["task_mode"] = args.task_mode
-                    if args.task_id is not None:
-                        payload["task_id"] = int(args.task_id)
-                    if args.satellite is not None:
-                        payload["satellite"] = bool(args.satellite)
+                    payload = build_policy_payload(
+                        image=frame,
+                        encoded_image=_encode_jpeg_base64(frame, args.jpeg_quality),
+                        timestamp_ns=ts,
+                        current_pose=obs.get("current_pose", [0, 0, 0]),
+                        goal_pose=obs.get("goal_pose"),
+                        instruction=instruction_text,
+                        task_mode=args.task_mode,
+                        task_id=args.task_id,
+                        satellite=args.satellite,
+                        metric_waypoint_spacing=args.metric_waypoint_spacing,
+                    )
                     t_policy = time.monotonic()
                     resp = requests.post(
                         args.policy_url,

@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from asyncvla_pi import HailoEdgeRunner, HailoEdgeRunnerConfig, ImageRingBuffer, PDController, PDControllerConfig
+from asyncvla_pi.policy_payload import build_policy_payload
 from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig
 
 try:
@@ -49,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=0.0)
     parser.add_argument("--goal-y", type=float, default=0.0)
     parser.add_argument("--goal-yaw", type=float, default=0.0)
+    parser.add_argument("--metric-waypoint-spacing", type=float, default=0.1)
     parser.add_argument("--instruction", default="move forward")
     parser.add_argument(
         "--task-mode",
@@ -365,6 +367,7 @@ def main() -> None:
 
     print(f"Start demo. policy_url={args.policy_url}, hef={hef_path}")
     print(f"instruction={args.instruction}")
+    print(f"metric_waypoint_spacing={args.metric_waypoint_spacing}")
     if args.task_mode is not None:
         print(f"task_mode={args.task_mode}")
     if args.task_id is not None:
@@ -401,25 +404,18 @@ def main() -> None:
                 try:
                     frame = np.asarray(obs["front_image"])
                     ts = int(obs["timestamp_ns"])
-                    payload = {
-                        "timestamp_ns": ts,
-                        "instruction": args.instruction,
-                        "goal_pose": np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32).tolist(),
-                        "current_pose": np.asarray(obs.get("current_pose", [0, 0, 0]), dtype=np.float32).tolist(),
-                        "images": {
-                            "front_image": {
-                                "encoding": "jpeg_base64",
-                                "data": _encode_jpeg_base64(frame, args.jpeg_quality),
-                                "shape": list(frame.shape),
-                            }
-                        },
-                    }
-                    if args.task_mode is not None:
-                        payload["task_mode"] = args.task_mode
-                    if args.task_id is not None:
-                        payload["task_id"] = int(args.task_id)
-                    if args.satellite is not None:
-                        payload["satellite"] = bool(args.satellite)
+                    payload = build_policy_payload(
+                        image=frame,
+                        encoded_image=_encode_jpeg_base64(frame, args.jpeg_quality),
+                        timestamp_ns=ts,
+                        current_pose=obs.get("current_pose", [0, 0, 0]),
+                        goal_pose=obs.get("goal_pose"),
+                        instruction=args.instruction,
+                        task_mode=args.task_mode,
+                        task_id=args.task_id,
+                        satellite=args.satellite,
+                        metric_waypoint_spacing=args.metric_waypoint_spacing,
+                    )
                     t_policy = time.monotonic()
                     resp = requests.post(
                         args.policy_url,
