@@ -41,7 +41,7 @@ def _prepare_observation(payload: dict[str, Any], image_key: str) -> dict[str, A
     obs: dict[str, Any] = {
         "timestamp_ns": int(payload.get("timestamp_ns", time.monotonic_ns())),
         "instruction": payload.get("instruction", ""),
-        "goal_pose": payload.get("goal_pose", [0.0, 0.0, 0.0]),
+        "goal_pose": payload.get("goal_pose"),
         "task_mode": payload.get("task_mode"),
         "task_id": payload.get("task_id"),
         "satellite": bool(payload.get("satellite", False)),

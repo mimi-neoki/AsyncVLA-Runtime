@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,10 +81,15 @@ def infer_edge_adapter_architecture(
     )
 
 
-class LearnedPositionalEncoding(nn.Module):
-    def __init__(self, seq_len: int, embed_dim: int) -> None:
+class PositionalEncoding(nn.Module):
+    def __init__(self, embed_dim: int, seq_len: int) -> None:
         super().__init__()
-        self.pos_enc = nn.Parameter(torch.zeros(1, seq_len, embed_dim))
+        pos_enc = torch.zeros(seq_len, embed_dim)
+        pos = torch.arange(0, seq_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2, dtype=torch.float32) * (-math.log(10000.0) / embed_dim))
+        pos_enc[:, 0::2] = torch.sin(pos * div_term)
+        pos_enc[:, 1::2] = torch.cos(pos * div_term)
+        self.register_buffer("pos_enc", pos_enc.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.pos_enc[:, : x.shape[1], :]
@@ -99,31 +105,20 @@ class MultiLayerDecoderTrans(nn.Module):
         ff_dim_factor: int,
     ) -> None:
         super().__init__()
-        self.positional_encoding = LearnedPositionalEncoding(seq_len=seq_len, embed_dim=embed_dim)
+        self.positional_encoding = PositionalEncoding(embed_dim=embed_dim, seq_len=seq_len)
         ff_dim = embed_dim * ff_dim_factor
         self.sa_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
             nhead=nhead,
             dim_feedforward=ff_dim,
+            activation="gelu",
             batch_first=True,
-            dropout=0.0,
-            activation="relu",
+            norm_first=True,
         )
-        self.sa_decoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=embed_dim,
-                nhead=nhead,
-                dim_feedforward=ff_dim,
-                batch_first=True,
-                dropout=0.0,
-                activation="relu",
-            ),
-            num_layers=num_layers,
-        )
+        self.sa_decoder = nn.TransformerEncoder(self.sa_layer, num_layers=num_layers)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         x = self.positional_encoding(tokens)
-        x = self.sa_layer(x)
         return self.sa_decoder(x)
 
 

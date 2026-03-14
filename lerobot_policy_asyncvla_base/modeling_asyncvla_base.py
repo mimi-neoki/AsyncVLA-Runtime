@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.machinery
+import importlib.util
 import sys
 import time
 import types
@@ -25,6 +26,10 @@ except Exception:  # pragma: no cover
 
 ACTION_DIM = 4
 NUM_ACTIONS_CHUNK = 8
+ACTION_TOKENS_LEN = ACTION_DIM * NUM_ACTIONS_CHUNK
+ACTION_TOKEN_BEGIN_IDX = 31743
+IGNORE_INDEX = -100
+STOP_TOKEN_ID = 2
 TASK_MODE_TO_ID = {
     "satellite_only": 0,
     "pose_and_satellite": 1,
@@ -42,6 +47,52 @@ TASK_MODE_TO_ID = {
 class GuidancePacket:
     projected_tokens: np.ndarray
     timestamp_ns: int
+
+
+class _OfficialActionTokenizer:
+    def __init__(self, tokenizer: Any, bins: int = 256, min_action: int = -1, max_action: int = 1) -> None:
+        self.tokenizer = tokenizer
+        self.bins = np.linspace(min_action, max_action, bins)
+
+    def __call__(self, action: np.ndarray) -> Any:
+        action = np.clip(action, a_min=-1.0, a_max=1.0)
+        discretized = np.digitize(action, self.bins)
+        token_ids = self.tokenizer.vocab_size - discretized
+        if len(discretized.shape) == 1:
+            return self.tokenizer.decode(list(token_ids))
+        return self.tokenizer.batch_decode(token_ids.tolist())
+
+
+class _OfficialPurePromptBuilder:
+    def __init__(self) -> None:
+        self.prompt = ""
+        self.turn_count = 0
+
+    def add_turn(self, role: str, message: str) -> None:
+        message = message.replace("<image>", "").strip()
+        if (self.turn_count % 2) == 0:
+            wrapped = f"In: {message}\nOut: "
+        else:
+            wrapped = f"{message if message != '' else ' '}</s>"
+        self.prompt += wrapped
+        self.turn_count += 1
+
+    def get_prompt(self) -> str:
+        return self.prompt.removeprefix("<s>").rstrip()
+
+
+def _get_current_action_mask(token_ids: torch.Tensor) -> torch.Tensor:
+    action_positions = token_ids != IGNORE_INDEX
+    cumsum = torch.cumsum(action_positions, dim=1)
+    mask = (1 <= cumsum) & (cumsum <= ACTION_DIM)
+    return mask * (token_ids > ACTION_TOKEN_BEGIN_IDX)
+
+
+def _get_next_actions_mask(token_ids: torch.Tensor) -> torch.Tensor:
+    action_positions = token_ids != IGNORE_INDEX
+    cumsum = torch.cumsum(action_positions, dim=1)
+    mask = cumsum > ACTION_DIM
+    return mask * (token_ids > ACTION_TOKEN_BEGIN_IDX)
 
 
 class ProprioProjector(nn.Module):
@@ -153,6 +204,7 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
         self.snapshot_dir = self.config.resolve_snapshot_dir()
 
         self.processor, self.base_model = self._load_base_runtime()
+        self._validate_official_modality_contract()
 
         self.pose_projector = ProprioProjector(llm_dim=config.hidden_dim, proprio_dim=4).to(
             device=self.device,
@@ -264,10 +316,17 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
 
         processor = AutoProcessor.from_pretrained(str(self.snapshot_dir), trust_remote_code=True)
         load_kwargs = self._build_model_load_kwargs(transformers)
-        model = AutoModelForVision2Seq.from_pretrained(
-            str(self.snapshot_dir),
-            **load_kwargs,
-        )
+        modeling_module = self._load_snapshot_package_module("modeling_prismatic")
+        model_cls = getattr(modeling_module, "OpenVLAForActionPrediction_MMNv1", None)
+        if model_cls is None:
+            model = AutoModelForVision2Seq.from_pretrained(
+                str(self.snapshot_dir),
+                **load_kwargs,
+            )
+        else:
+            model_load_kwargs = dict(load_kwargs)
+            model_load_kwargs.pop("trust_remote_code", None)
+            model = model_cls.from_pretrained(str(self.snapshot_dir), **model_load_kwargs)
         if hasattr(model, "vision_backbone") and hasattr(model.vision_backbone, "set_num_images_in_input"):
             model.vision_backbone.set_num_images_in_input(int(self.config.num_images_in_input))
         if self.quantization_mode == "none":
@@ -307,6 +366,30 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
         vla_root = prismatic_root / "vla"
         if vla_root.exists():
             self._register_namespace_package("prismatic.vla", vla_root)
+
+    def _load_snapshot_package_module(self, module_stem: str) -> types.ModuleType:
+        package_name = f"_asyncvla_snapshot_{abs(hash(str(self.snapshot_dir)))}"
+        if package_name not in sys.modules:
+            package = types.ModuleType(package_name)
+            package.__file__ = str(self.snapshot_dir / "__init__.py")
+            package.__path__ = [str(self.snapshot_dir)]  # type: ignore[attr-defined]
+            spec = importlib.machinery.ModuleSpec(package_name, loader=None, is_package=True)
+            spec.submodule_search_locations = [str(self.snapshot_dir)]
+            package.__spec__ = spec
+            sys.modules[package_name] = package
+
+        full_name = f"{package_name}.{module_stem}"
+        if full_name in sys.modules:
+            return sys.modules[full_name]
+
+        module_path = self.snapshot_dir / f"{module_stem}.py"
+        spec = importlib.util.spec_from_file_location(full_name, module_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Failed to load snapshot module: {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[full_name] = module
+        spec.loader.exec_module(module)
+        return module
 
     def _load_pose_projector_checkpoint(self) -> None:
         path = self.config.resolve_pose_projector_path()
@@ -355,6 +438,16 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
             self.base_model.norm_stats = norm_stats
             return runtime_key
         return None
+
+    def _validate_official_modality_contract(self) -> None:
+        required_attrs = ["vision_backbone"]
+        missing = [name for name in required_attrs if not hasattr(self.base_model, name)]
+        if missing:
+            missing_text = ", ".join(missing)
+            raise RuntimeError(
+                "Loaded base model does not support AsyncVLA official modality path. "
+                f"Missing attributes: {missing_text}"
+            )
 
     def _extract_image(self, observation: dict[str, Any], key: str) -> np.ndarray:
         value = observation.get(key)
@@ -436,11 +529,47 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
             return np.array([x, y, 1.0, 0.0], dtype=np.float32)
         return np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
 
-    def _build_prompt(self, instruction: str) -> str:
+    def _build_prompt(self, instruction: str, task_id: int) -> str:
+        if task_id not in {TASK_MODE_TO_ID["language_only"], TASK_MODE_TO_ID["language_and_pose"]}:
+            # Match official AsyncVLA non-language prompt behavior.
+            return "No language instruction"
         task = instruction.strip()
         if not task:
             task = "move toward the goal"
-        return f"In: What action should the robot take to {task}?\nOut:"
+        return f"What action should the robot take to {task}?"
+
+    def _build_official_labels_batch(
+        self,
+        prompt_text: str,
+        current_img_t: torch.Tensor,
+        goal_img_t: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # The official demo scaffolds a fake action response to recover the same label-based masks used in training.
+        dummy_actions = np.random.default_rng(0).random((NUM_ACTIONS_CHUNK, ACTION_DIM), dtype=np.float32)
+        action_tokenizer = _OfficialActionTokenizer(self.processor.tokenizer)
+        current_action = dummy_actions[0]
+        future_actions = dummy_actions[1:]
+        future_actions_string = "".join(action_tokenizer(future_actions))
+        current_action_string = action_tokenizer(current_action)
+        action_chunk_string = current_action_string + future_actions_string
+        action_chunk_len = len(action_chunk_string)
+
+        prompt_builder = _OfficialPurePromptBuilder()
+        prompt_builder.add_turn("human", prompt_text)
+        prompt_builder.add_turn("gpt", action_chunk_string)
+        prompt = prompt_builder.get_prompt()
+
+        tokenized = self.processor.tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
+        input_ids = tokenized["input_ids"]
+        attention_mask = tokenized["attention_mask"]
+        labels = input_ids.clone()
+        labels[:, : -(action_chunk_len + 1)] = IGNORE_INDEX
+
+        if goal_img_t is None:
+            pixel_values = current_img_t.unsqueeze(0)
+        else:
+            pixel_values = torch.cat((current_img_t, goal_img_t), dim=0).unsqueeze(0)
+        return input_ids, attention_mask, labels, pixel_values
 
     def _resolve_task_id(self, observation: dict[str, Any]) -> int:
         if self.config.task_id is not None:
@@ -490,47 +619,75 @@ class AsyncVLABasePolicy(PreTrainedPolicy):
 
     def _prepare_model_inputs(self, observation: dict[str, Any]) -> tuple[dict[str, torch.Tensor], np.ndarray]:
         current_image_np = self._extract_image(observation, self.config.image_key)
-        goal_image_np = self._extract_goal_image(observation, current_image_np)
+        task_id = self._resolve_task_id(observation)
 
-        prompt = self._build_prompt(str(observation.get(self.config.instruction_key, "")))
-        tokenized = self.processor.tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
-        input_ids = tokenized["input_ids"]
-        attention_mask = tokenized["attention_mask"]
+        prompt = self._build_prompt(str(observation.get(self.config.instruction_key, "")), task_id)
 
         current_img_t = self.processor.image_processor.apply_transform(_to_pil_image(current_image_np))
-        goal_img_t = self.processor.image_processor.apply_transform(_to_pil_image(goal_image_np))
         if int(self.config.num_images_in_input) <= 1:
-            pixel_values = current_img_t.unsqueeze(0)
+            goal_img_t = None
         else:
-            pixel_values = torch.cat((current_img_t, goal_img_t), dim=0).unsqueeze(0)
+            goal_image_np = self._extract_goal_image(observation, current_image_np)
+            goal_img_t = self.processor.image_processor.apply_transform(_to_pil_image(goal_image_np))
+        input_ids, attention_mask, labels, pixel_values = self._build_official_labels_batch(
+            prompt_text=prompt,
+            current_img_t=current_img_t,
+            goal_img_t=goal_img_t,
+        )
 
         inputs = {
             "input_ids": input_ids.to(self.device),
             "attention_mask": attention_mask.to(self.device),
+            "labels": labels.to(self.device),
             "pixel_values": pixel_values.to(self.device, dtype=self.dtype),
+            "task_id": torch.tensor([task_id], dtype=self.dtype, device=self.device),
         }
         return inputs, current_image_np
+
+    def _predict_actions_hidden_states_official(
+        self,
+        model_inputs: dict[str, torch.Tensor],
+        proprio: np.ndarray,
+    ) -> torch.Tensor:
+        input_ids = model_inputs["input_ids"]
+        attention_mask = model_inputs["attention_mask"]
+        labels = model_inputs["labels"]
+        pixel_values = model_inputs["pixel_values"]
+        modality_id = model_inputs["task_id"]
+
+        output = self.base_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            modality_id=modality_id,
+            labels=labels,
+            output_hidden_states=True,
+            proprio=torch.as_tensor(proprio[None, :], device=self.device, dtype=self.dtype),
+            proprio_projector=self.pose_projector,
+            noisy_action_projector=None,
+            use_film=False,
+        )
+        if getattr(output, "hidden_states", None) is None:
+            raise RuntimeError("Base model forward did not return hidden_states")
+        last_hidden_states = output.hidden_states[-1]
+        ground_truth_token_ids = labels[:, 1:]
+        current_action_mask = _get_current_action_mask(ground_truth_token_ids)
+        next_actions_mask = _get_next_actions_mask(ground_truth_token_ids)
+        num_patches = int(self.base_model.vision_backbone.get_num_patches()) * int(
+            self.base_model.vision_backbone.get_num_images_in_input()
+        )
+        num_patches += 1  # proprio token
+        text_hidden_states = last_hidden_states[:, num_patches:-1]
+        batch_size = int(input_ids.shape[0])
+        return text_hidden_states[current_action_mask | next_actions_mask].reshape(batch_size, ACTION_TOKENS_LEN, -1)
 
     @torch.inference_mode()
     def infer(self, observation: dict[str, Any]) -> GuidancePacket:
         model_inputs, _ = self._prepare_model_inputs(observation)
         goal_pose_raw = np.asarray(observation.get(self.config.goal_pose_key, [0.0, 0.0, 0.0]), dtype=np.float32)
         proprio = self._goal_pose_to_proprio(goal_pose_raw)
-        task_id = self._resolve_task_id(observation)
-        task_id_t = torch.tensor([task_id], dtype=self.dtype, device=self.device)
-
-        _, actions_hidden_states = self.base_model.predict_action(
-            input_ids=model_inputs["input_ids"],
-            attention_mask=model_inputs["attention_mask"],
-            pixel_values=model_inputs["pixel_values"],
-            unnorm_key=self.unnorm_key,
-            proprio=proprio[None, :],
-            proprio_projector=self.pose_projector,
-            action_head=None,
-            noisy_action_projector=None,
-            use_film=False,
-            do_sample=False,
-        )
+        task_id_t = model_inputs["task_id"]
+        actions_hidden_states = self._predict_actions_hidden_states_official(model_inputs, proprio)
         projected = self.action_proj.predict_action(actions_hidden_states, task_id_t)
         projected_np = projected.squeeze(0).detach().cpu().to(torch.float32).numpy()
         timestamp_ns = int(observation.get(self.config.timestamp_key, time.monotonic_ns()))
