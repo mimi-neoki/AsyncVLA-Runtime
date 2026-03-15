@@ -231,8 +231,8 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(satellite=None)
 
     # HEF vstream names for edge_adapter_v520.hef
-    parser.add_argument("--input-current-name", default="edge/input_layer2")
-    parser.add_argument("--input-delayed-name", default="edge/input_layer1")
+    parser.add_argument("--input-current-name", default="edge/input_layer1")
+    parser.add_argument("--input-delayed-name", default="edge/input_layer2")
     parser.add_argument("--input-tokens-name", default="edge/input_layer3")
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
