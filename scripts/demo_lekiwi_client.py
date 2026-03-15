@@ -428,6 +428,10 @@ def _draw_overlay(
     loop_ms: float,
     policy_ms: float,
     edge_ms: float,
+    control_source: str = "UNKNOWN",
+    sent_base_action: dict[str, float] | None = None,
+    target_pose: np.ndarray | None = None,
+    rotate_on_missing_target: bool = False,
     show_object_check: bool = False,
     object_check_result: ObjectCheckResult | None = None,
     object_check_active_target: str | None = None,
@@ -448,7 +452,18 @@ def _draw_overlay(
     texts = [
         f"loop={loop_ms:.1f}ms policy={policy_ms:.1f}ms edge={edge_ms:.1f}ms",
         f"linear={cmd.get('linear', 0.0):+.3f} angular={cmd.get('angular', 0.0):+.3f}",
+        f"control={control_source} rotate_on_missing={int(rotate_on_missing_target)}",
     ]
+    if sent_base_action is not None:
+        texts.append(
+            f"sent x={sent_base_action.get('x.vel', 0.0):+.3f} "
+            f"y={sent_base_action.get('y.vel', 0.0):+.3f} "
+            f"th={sent_base_action.get('theta.vel', 0.0):+.3f}"
+        )
+    if target_pose is not None:
+        t = np.asarray(target_pose, dtype=np.float32).reshape(-1)
+        if t.size >= 3:
+            texts.append(f"target_pose x={t[0]:+.3f} y={t[1]:+.3f} yaw={t[2]:+.3f}")
     if error_text:
         texts.append(f"error={error_text}")
 
@@ -874,6 +889,9 @@ def main() -> None:
             edge_ms = 0.0
             cmd = {"linear": 0.0, "angular": 0.0}
             pose_chunk = np.zeros((8, 4), dtype=np.float32)
+            control_source = "WAIT_OBS_OR_GUIDANCE"
+            sent_base_action: dict[str, float] | None = None
+            target_pose_for_vis: np.ndarray | None = None
 
             with lock:
                 obs = dict(latest_obs) if latest_obs is not None else None
@@ -896,6 +914,7 @@ def main() -> None:
 
             if should_rotate:
                 cmd = {"linear": 0.0, "angular": 0.05}
+                control_source = "YOLO_ROTATE"
                 if object_check_result is not None:
                     error_text = f"target not found: {object_check_result.target_text} -> rotate in place"
                 else:
@@ -920,17 +939,33 @@ def main() -> None:
                         metric_waypoint_spacing=args.metric_waypoint_spacing,
                     )
                     target_pose = _target_pose_from_action(pose_chunk[0])
+                    target_pose_for_vis = target_pose
                     current_pose = np.asarray(obs.get("current_pose", [0.0, 0.0, 0.0]), dtype=np.float32)
                     cmd = pd.compute_cmd(current_pose=current_pose, target_pose=target_pose, timestamp_ns=int(obs.get("timestamp_ns", 0)))
+                    control_source = "EDGE_PD"
     
                 except Exception as exc:
                     error_text = str(exc)
+                    control_source = "EDGE_ERROR"
+            elif obs is None:
+                control_source = "WAIT_OBS"
+            else:
+                control_source = "WAIT_GUIDANCE"
             if should_rotate:
-                lekiwi.send_action(ROTATE_IN_PLACE_ACTION)
+                sent_base_action = {
+                    "x.vel": float(ROTATE_IN_PLACE_ACTION.get("x.vel", 0.0)),
+                    "y.vel": float(ROTATE_IN_PLACE_ACTION.get("y.vel", 0.0)),
+                    "theta.vel": float(ROTATE_IN_PLACE_ACTION.get("theta.vel", 0.0)),
+                }
+                lekiwi.send_action(sent_base_action)
             else:
                 lekiwi_action = lekiwi._from_bi_wheel_action_to_base_action(cmd)
-                # print(lekiwi_action)
-                lekiwi.send_action(lekiwi_action)
+                sent_base_action = {
+                    "x.vel": float(lekiwi_action.get("x.vel", 0.0)),
+                    "y.vel": float(lekiwi_action.get("y.vel", 0.0)),
+                    "theta.vel": float(lekiwi_action.get("theta.vel", 0.0)),
+                }
+                lekiwi.send_action(sent_base_action)
 
             loop_ms = (time.monotonic() - t0) * 1000.0
             vis = _draw_overlay(
@@ -941,6 +976,10 @@ def main() -> None:
                 loop_ms=loop_ms,
                 policy_ms=policy_ms,
                 edge_ms=edge_ms,
+                control_source=control_source,
+                sent_base_action=sent_base_action,
+                target_pose=target_pose_for_vis,
+                rotate_on_missing_target=should_rotate,
                 show_object_check=args.stdin_object_check,
                 object_check_result=object_check_result,
                 object_check_active_target=object_check_active,
