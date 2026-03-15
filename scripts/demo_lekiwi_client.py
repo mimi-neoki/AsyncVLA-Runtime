@@ -350,6 +350,53 @@ def _pose_chunk_to_matrix(output: np.ndarray) -> np.ndarray:
     return arr.astype(np.float32)
 
 
+def _delta_chunk_to_pose_chunk(delta_chunk: np.ndarray, metric_waypoint_spacing: float) -> np.ndarray:
+    """Convert local delta trajectory [dx, dy, cos(dth), sin(dth)] to accumulated poses."""
+    chunk = np.asarray(delta_chunk, dtype=np.float32)
+    if chunk.ndim != 2:
+        raise ValueError(f"delta_chunk must be 2D, got shape={chunk.shape}")
+    if chunk.shape[0] == 0:
+        raise ValueError("delta_chunk is empty")
+
+    t_steps = int(chunk.shape[0])
+    dx = chunk[:, 0] if chunk.shape[1] >= 1 else np.zeros((t_steps,), dtype=np.float32)
+    dy = chunk[:, 1] if chunk.shape[1] >= 2 else np.zeros((t_steps,), dtype=np.float32)
+    if chunk.shape[1] >= 4:
+        dtheta = np.arctan2(chunk[:, 3], chunk[:, 2]).astype(np.float32)
+    elif chunk.shape[1] >= 3:
+        dtheta = chunk[:, 2].astype(np.float32)
+    else:
+        dtheta = np.zeros((t_steps,), dtype=np.float32)
+
+    poses = np.zeros((t_steps, 4), dtype=np.float32)
+    x = float(dx[0])
+    y = float(dy[0])
+    theta = float(dtheta[0])
+    poses[0, 0] = x
+    poses[0, 1] = y
+    poses[0, 2] = float(np.cos(theta))
+    poses[0, 3] = float(np.sin(theta))
+
+    for t in range(1, t_steps):
+        ct = float(np.cos(theta))
+        st = float(np.sin(theta))
+        dx_w = ct * float(dx[t]) - st * float(dy[t])
+        dy_w = st * float(dx[t]) + ct * float(dy[t])
+        x += dx_w
+        y += dy_w
+        theta += float(dtheta[t])
+        poses[t, 0] = x
+        poses[t, 1] = y
+        poses[t, 2] = float(np.cos(theta))
+        poses[t, 3] = float(np.sin(theta))
+
+    spacing = float(metric_waypoint_spacing)
+    if spacing <= 0.0:
+        raise ValueError(f"metric_waypoint_spacing must be > 0, got {metric_waypoint_spacing}")
+    poses[:, :2] *= spacing
+    return poses
+
+
 def _target_pose_from_action(action_step: np.ndarray) -> np.ndarray:
     step = np.asarray(action_step, dtype=np.float32).reshape(-1)
     x = float(step[0]) if step.size > 0 else 0.0
@@ -867,7 +914,11 @@ def main() -> None:
                             goal_pose=np.asarray(obs.get("goal_pose", [0, 0, 0]), dtype=np.float32),
                         )
                     edge_ms = (time.monotonic() - t_edge) * 1000.0
-                    pose_chunk = _pose_chunk_to_matrix(raw_out)
+                    delta_chunk = _pose_chunk_to_matrix(raw_out)
+                    pose_chunk = _delta_chunk_to_pose_chunk(
+                        delta_chunk,
+                        metric_waypoint_spacing=args.metric_waypoint_spacing,
+                    )
                     target_pose = _target_pose_from_action(pose_chunk[0])
                     current_pose = np.asarray(obs.get("current_pose", [0.0, 0.0, 0.0]), dtype=np.float32)
                     cmd = pd.compute_cmd(current_pose=current_pose, target_pose=target_pose, timestamp_ns=int(obs.get("timestamp_ns", 0)))
