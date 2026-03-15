@@ -254,6 +254,22 @@ class HailoEdgeRunner:
         self._mode = "infer_model"
         self._ready = True
 
+    def _dequantize_infer_model_output(self, output_name: str, output: np.ndarray) -> np.ndarray:
+        """InferModel path may return quantized buffers even when float output is requested."""
+        if self.config.output_format_type.lower() != "float32":
+            return np.asarray(output, dtype=np.float32)
+        try:
+            quant_infos = self._infer_model.output(output_name).quant_infos
+            if not quant_infos:
+                return np.asarray(output, dtype=np.float32)
+            qinfo = quant_infos[0]
+            scale = float(qinfo.qp_scale)
+            zp = float(qinfo.qp_zp)
+            return (np.asarray(output, dtype=np.float32) - zp) * scale
+        except Exception:
+            # Fall back to plain cast if quant metadata is unavailable.
+            return np.asarray(output, dtype=np.float32)
+
     @staticmethod
     def _align_rank_for_infer_model(array: np.ndarray, expected_rank: int) -> np.ndarray:
         if array.ndim == expected_rank:
@@ -304,13 +320,21 @@ class HailoEdgeRunner:
             if output_name not in self._infer_model.output_names:
                 output_name = self._infer_model.output_names[0]
             out_shape = tuple(self._infer_model.output(output_name).shape)
-            out_dtype = np.uint8 if self.config.output_format_type.lower() in {"uint8", "auto"} else np.float32
+            # InferModel expects a native-quantized buffer shape/size.
+            # Use UINT8 buffer and dequantize manually when float output is requested.
+            if self.config.output_format_type.lower() == "float32":
+                out_dtype = np.uint8
+            else:
+                out_dtype = np.uint8 if self.config.output_format_type.lower() in {"uint8", "auto"} else np.float32
             out_buf = np.empty(out_shape, dtype=out_dtype)
             bindings.output(output_name).set_buffer(out_buf)
             configured.run([bindings], 10000)
             output = out_buf
 
-        output = np.asarray(output, dtype=np.float32)
+        if self._mode == "infer_model":
+            output = self._dequantize_infer_model_output(output_name, output)
+        else:
+            output = np.asarray(output, dtype=np.float32)
         if output.ndim == 3 and output.shape[1] == 1 and output.shape[0] == self.config.chunk_size:
             output = output.reshape(1, self.config.chunk_size, -1)
         if output.ndim == 2:
