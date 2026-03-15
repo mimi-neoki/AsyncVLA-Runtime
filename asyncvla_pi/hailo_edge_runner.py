@@ -29,6 +29,7 @@ class HailoEdgeRunnerConfig:
     input_format_type: str = "float32"
     output_format_type: str = "float32"
     image_scale_255: bool = True
+    convert_bgr_to_rgb: bool = False
     token_uint8_mode: str = "dynamic_minmax"
 
 
@@ -73,6 +74,13 @@ class HailoEdgeRunner:
         arr = np.asarray(image)
         if arr.ndim != 3:
             raise ValueError(f"Expected HWC image, got {arr.shape}")
+        if self.config.convert_bgr_to_rgb:
+            if arr.shape[2] != 3:
+                raise ValueError(f"Expected 3-channel image for BGR->RGB conversion, got {arr.shape}")
+            if cv2 is not None:
+                arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+            else:
+                arr = arr[..., ::-1]
         resized = self._resize(arr)
         if self.config.input_format_type.lower() in {"uint8", "auto"}:
             data = resized.astype(np.uint8)

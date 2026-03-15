@@ -579,6 +579,7 @@ def main() -> None:
             output_format_type=args.output_format,
             normalize_imagenet=args.normalize_imagenet,
             image_scale_255=args.image_scale_255,
+            convert_bgr_to_rgb=True,
         ),
         target=shared_hailo_target,
     )
