@@ -21,7 +21,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from asyncvla_pi import HailoEdgeRunner, HailoEdgeRunnerConfig, ImageRingBuffer, PDController, PDControllerConfig
+from asyncvla_pi import (
+    HailoEdgeRunner,
+    HailoEdgeRunnerConfig,
+    ImageRingBuffer,
+    PDController,
+    PDControllerConfig,
+    TorchEdgeRunner,
+    TorchEdgeRunnerConfig,
+)
 from asyncvla_pi.policy_payload import build_policy_payload
 from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig
 
@@ -173,7 +181,11 @@ def parse_args() -> argparse.Namespace:
         description="Demo: camera -> base VLA server -> Hailo edge adapter -> action overlay"
     )
     parser.add_argument("--policy-url", required=True, help="e.g. http://<server-ip>:8000/infer")
+    parser.add_argument("--edge-backend", choices=["hef", "hf"], default="hef")
     parser.add_argument("--hef", default="models/edge_adapter_v520.hef")
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
+    parser.add_argument("--edge-device", default="cpu", help="Used only when --edge-backend=hf")
+    parser.add_argument("--edge-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--camera-index", default="0")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
@@ -590,7 +602,9 @@ def main() -> None:
     args = parse_args()
     if cv2 is None:
         raise RuntimeError("OpenCV is required")
-    _ensure_hailo_runtime_available()
+    needs_hailo_runtime = args.edge_backend == "hef" or args.stdin_object_check
+    if needs_hailo_runtime:
+        _ensure_hailo_runtime_available()
 
     libcamerify_active = os.environ.get("ASYNCVLA_LIBCAMERIFY_ACTIVE") == "1"
     if args.libcamerify == "on" and not libcamerify_active:
@@ -599,8 +613,11 @@ def main() -> None:
         _reexec_with_libcamerify()
 
     hef_path = Path(args.hef).expanduser().resolve()
-    if not hef_path.exists():
+    hf_dir = Path(args.hf_dir).expanduser().resolve()
+    if args.edge_backend == "hef" and not hef_path.exists():
         raise FileNotFoundError(f"HEF not found: {hef_path}")
+    if args.edge_backend == "hf" and not hf_dir.exists():
+        raise FileNotFoundError(f"HF directory not found: {hf_dir}")
 
     robot = RaspiMobileRobot(
         config=RaspiMobileRobotConfig(
@@ -624,27 +641,41 @@ def main() -> None:
         shared_hailo_target_ctx = VDevice()
         shared_hailo_target = shared_hailo_target_ctx.__enter__()
 
-    edge_runner = HailoEdgeRunner(
-        HailoEdgeRunnerConfig(
-            hef_path=str(hef_path),
-            input_current_image=args.input_current_name,
-            input_delayed_image=args.input_delayed_name,
-            input_projected_tokens=args.input_tokens_name,
-            input_goal_pose=None,
-            output_action_chunk=args.output_chunk_name,
-            image_height=96,
-            image_width=96,
-            chunk_size=8,
-            pose_dim=4,
-            image_layout=args.image_layout,
-            input_format_type=args.input_format,
-            output_format_type=args.output_format,
-            normalize_imagenet=args.normalize_imagenet,
-            image_scale_255=args.image_scale_255,
-            convert_bgr_to_rgb=True,
-        ),
-        target=shared_hailo_target,
-    )
+    if args.edge_backend == "hef":
+        edge_runner = HailoEdgeRunner(
+            HailoEdgeRunnerConfig(
+                hef_path=str(hef_path),
+                input_current_image=args.input_current_name,
+                input_delayed_image=args.input_delayed_name,
+                input_projected_tokens=args.input_tokens_name,
+                input_goal_pose=None,
+                output_action_chunk=args.output_chunk_name,
+                image_height=96,
+                image_width=96,
+                chunk_size=8,
+                pose_dim=4,
+                image_layout=args.image_layout,
+                input_format_type=args.input_format,
+                output_format_type=args.output_format,
+                normalize_imagenet=args.normalize_imagenet,
+                image_scale_255=args.image_scale_255,
+                convert_bgr_to_rgb=True,
+            ),
+            target=shared_hailo_target,
+        )
+    else:
+        edge_runner = TorchEdgeRunner(
+            TorchEdgeRunnerConfig(
+                hf_dir=str(hf_dir),
+                image_height=96,
+                image_width=96,
+                normalize_imagenet=args.normalize_imagenet,
+                image_scale_255=True,
+                convert_bgr_to_rgb=True,
+                device=args.edge_device,
+                dtype=args.edge_dtype,
+            )
+        )
 
     ring = ImageRingBuffer(capacity=args.ring_capacity)
     pd = PDController(PDControllerConfig())
@@ -701,7 +732,12 @@ def main() -> None:
             (args.camera_width + PANEL_WIDTH, args.camera_height),
         )
 
-    print(f"Start demo. policy_url={args.policy_url}, hef={hef_path}")
+    print(f"Start demo. policy_url={args.policy_url}, edge_backend={args.edge_backend}")
+    if args.edge_backend == "hef":
+        print(f"hef={hef_path}")
+    else:
+        print(f"hf_dir={hf_dir}")
+        print(f"edge_device={args.edge_device} edge_dtype={args.edge_dtype}")
     print(f"instruction_verb={args.instruction_verb}")
     print(f"instruction_noun={args.instruction_noun}")
     print(f"instruction={_compose_instruction(args.instruction_verb, args.instruction_noun)}")
