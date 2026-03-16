@@ -211,6 +211,11 @@ def parse_args() -> argparse.Namespace:
         help="Initial target noun phrase. You can update this via stdin while running.",
     )
     parser.add_argument(
+        "--instruction-gui",
+        action="store_true",
+        help="Use a small GUI window for interactive target noun updates instead of stdin.",
+    )
+    parser.add_argument(
         "--task-mode",
         choices=[
             "auto",
@@ -272,10 +277,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yolo-input-text-name", default=None)
     parser.add_argument(
         "--stdin-object-check-mode",
-        choices=["not_found_only", "always"],
+        choices=["off", "not_found_only", "always"],
         default="not_found_only",
         help=(
             "Object check scheduling mode: "
+            "'off' disables stdin object checks entirely; "
             "'not_found_only' checks periodically only while target is NOT FOUND; "
             "'always' checks periodically regardless of current FOUND/NOT FOUND state."
         ),
@@ -611,6 +617,7 @@ def main() -> None:
         _reexec_with_libcamerify()
     if args.libcamerify == "auto" and not libcamerify_active and shutil.which("libcamerify"):
         _reexec_with_libcamerify()
+    object_check_enabled = bool(args.stdin_object_check) and args.stdin_object_check_mode != "off"
 
     hef_path = Path(args.hef).expanduser().resolve()
     hf_dir = Path(args.hf_dir).expanduser().resolve()
@@ -635,7 +642,7 @@ def main() -> None:
 
     shared_hailo_target_ctx: Any | None = None
     shared_hailo_target: Any | None = None
-    if args.stdin_object_check:
+    if object_check_enabled:
         from hailo_platform import VDevice
 
         shared_hailo_target_ctx = VDevice()
@@ -695,9 +702,15 @@ def main() -> None:
     active_object_check_noun: str | None = None
     last_object_check_result: ObjectCheckResult | None = None
     rotate_on_missing_target = False
+    use_instruction_gui = bool(args.instruction_gui)
+    if use_instruction_gui and os.name != "nt":
+        has_display = bool(os.environ.get("DISPLAY")) or bool(os.environ.get("WAYLAND_DISPLAY"))
+        if not has_display:
+            print("[instruction gui] display env is missing. Falling back to stdin input.")
+            use_instruction_gui = False
 
     object_checker: StdinObjectChecker | None = None
-    if args.stdin_object_check:
+    if object_check_enabled:
         yolo_hef = Path(args.yolo_hef).expanduser().resolve()
         clip_hef = Path(args.clip_hef).expanduser().resolve()
         if not yolo_hef.exists():
@@ -742,8 +755,13 @@ def main() -> None:
     print(f"instruction_noun={args.instruction_noun}")
     print(f"instruction={_compose_instruction(args.instruction_verb, args.instruction_noun)}")
     print(f"metric_waypoint_spacing={args.metric_waypoint_spacing}")
-    print("Type a new noun phrase and press Enter to update it while running.")
-    if args.stdin_object_check:
+    if use_instruction_gui:
+        print("Instruction input mode: GUI (--instruction-gui).")
+    else:
+        print("Type a new noun phrase and press Enter to update it while running.")
+    if args.stdin_object_check and args.stdin_object_check_mode == "off":
+        print("stdin_object_check=disabled by mode=off (instruction updates only affect path generation).")
+    elif object_check_enabled:
         print(
             "stdin_object_check=enabled "
             f"(conf_thres={args.yolo_conf_thres:.2f}, "
@@ -760,6 +778,21 @@ def main() -> None:
     robot.connect()
     lekiwi.connect()
     assert lekiwi.is_connected, "Failed to connect to LeKiwiClient"
+
+    def apply_instruction_update(text: str, source: str) -> bool:
+        nonlocal current_instruction_noun, pending_object_check_noun
+        normalized = str(text).strip()
+        if not normalized:
+            return False
+        with lock:
+            current_instruction_noun = normalized
+            if object_check_enabled:
+                pending_object_check_noun = normalized
+        if object_check_enabled:
+            print(f"[instruction noun updated:{source}] {normalized} (object check queued)")
+        else:
+            print(f"[instruction noun updated:{source}] {normalized}")
+        return True
 
     def capture_loop() -> None:
         nonlocal latest_obs
@@ -826,7 +859,6 @@ def main() -> None:
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     def instruction_input_loop() -> None:
-        nonlocal current_instruction_noun, pending_object_check_noun
         while running.is_set():
             try:
                 line = sys.stdin.readline()
@@ -837,14 +869,87 @@ def main() -> None:
             text = line.strip()
             if not text:
                 continue
-            with lock:
-                current_instruction_noun = text
-                if args.stdin_object_check:
-                    pending_object_check_noun = text
-            if args.stdin_object_check:
-                print(f"[instruction noun updated] {text} (object check queued)")
+            apply_instruction_update(text, source="stdin")
+
+    def instruction_gui_loop() -> None:
+        try:
+            import tkinter as tk
+            from tkinter import font as tkfont
+            from tkinter import ttk
+        except Exception as exc:
+            print(f"[instruction gui error] tkinter is unavailable: {exc}")
+            print("[instruction gui] fallback to stdin input.")
+            instruction_input_loop()
+            return
+
+        try:
+            root = tk.Tk()
+        except Exception as exc:
+            print(f"[instruction gui error] failed to open GUI window: {exc}")
+            print("[instruction gui] fallback to stdin input.")
+            instruction_input_loop()
+            return
+
+        root.title("LeKiwi Target Selector")
+        root.geometry("760x320")
+        root.minsize(680, 280)
+
+        default_font = tkfont.nametofont("TkDefaultFont")
+        default_size = int(default_font.cget("size"))
+        base_size = max(abs(default_size), 11)
+        body_size = max(16, base_size + 4)
+        title_size = body_size + 6
+        entry_size = body_size + 2
+        status_size = max(14, body_size - 1)
+
+        style = ttk.Style(root)
+        style.configure("DemoTitle.TLabel", font=("TkDefaultFont", title_size, "bold"))
+        style.configure("DemoBody.TLabel", font=("TkDefaultFont", body_size))
+        style.configure("DemoStatus.TLabel", font=("TkDefaultFont", status_size))
+        style.configure("Demo.TButton", font=("TkDefaultFont", body_size, "bold"), padding=(18, 12))
+
+        current_var = tk.StringVar(value=f"Current target: {args.instruction_noun}")
+        entry_var = tk.StringVar(value=args.instruction_noun)
+        status_var = tk.StringVar(value="Edit target and press Apply or Enter.")
+
+        frame = ttk.Frame(root, padding=24)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="LeKiwi Demo: Target Object", style="DemoTitle.TLabel").pack(anchor=tk.W)
+        ttk.Label(frame, textvariable=current_var, style="DemoBody.TLabel").pack(anchor=tk.W, pady=(10, 12))
+        entry = tk.Entry(frame, textvariable=entry_var, font=("TkDefaultFont", entry_size), relief=tk.SOLID, bd=1)
+        entry.pack(fill=tk.X, ipady=8)
+
+        def _submit(*_args: Any) -> None:
+            target = entry_var.get().strip()
+            if not target:
+                status_var.set("Target cannot be empty.")
+                return
+            if apply_instruction_update(target, source="gui"):
+                current_var.set(f"Current target: {target}")
+                status_var.set(f"Applied: {target}")
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(fill=tk.X, pady=(14, 0))
+        ttk.Button(button_row, text="Apply", command=_submit, style="Demo.TButton").pack(side=tk.LEFT)
+        ttk.Label(frame, textvariable=status_var, style="DemoStatus.TLabel").pack(anchor=tk.W, pady=(12, 0))
+        entry.bind("<Return>", _submit)
+        entry.focus_set()
+
+        def _poll_running() -> None:
+            if running.is_set():
+                root.after(200, _poll_running)
             else:
-                print(f"[instruction noun updated] {text}")
+                root.quit()
+
+        def _on_close() -> None:
+            print("[instruction gui] window closed. Continue running without GUI updates.")
+            root.quit()
+
+        root.protocol("WM_DELETE_WINDOW", _on_close)
+        root.after(200, _poll_running)
+        root.mainloop()
+        root.destroy()
 
     def object_check_loop() -> None:
         nonlocal pending_object_check_noun, active_object_check_noun, last_object_check_result, rotate_on_missing_target
@@ -908,7 +1013,13 @@ def main() -> None:
 
     capture_thread = threading.Thread(target=capture_loop, name="capture", daemon=True)
     policy_thread = threading.Thread(target=policy_loop, name="policy", daemon=True)
-    instruction_thread = threading.Thread(target=instruction_input_loop, name="instruction_input", daemon=True)
+    instruction_thread_target = instruction_gui_loop if use_instruction_gui else instruction_input_loop
+    instruction_thread_name = "instruction_gui" if use_instruction_gui else "instruction_input"
+    instruction_thread = threading.Thread(
+        target=instruction_thread_target,
+        name=instruction_thread_name,
+        daemon=True,
+    )
     object_check_thread: threading.Thread | None = None
     if object_checker is not None:
         object_check_thread = threading.Thread(target=object_check_loop, name="object_check", daemon=True)
@@ -1016,7 +1127,7 @@ def main() -> None:
                 sent_base_action=sent_base_action,
                 target_pose=target_pose_for_vis,
                 rotate_on_missing_target=should_rotate,
-                show_object_check=args.stdin_object_check,
+                show_object_check=object_check_enabled,
                 object_check_result=object_check_result,
                 object_check_active_target=object_check_active,
                 object_check_pending_target=object_check_pending,

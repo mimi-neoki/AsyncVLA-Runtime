@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -136,13 +137,30 @@ def _build_text_embeddings_with_clip(
     try:
         import torch
         from transformers import CLIPTextModelWithProjection, CLIPTokenizerFast
+        from transformers.utils import logging as hf_logging
     except Exception as exc:
         raise RuntimeError(
             "transformers/torch import failed. Install project dependencies in this environment."
         ) from exc
 
-    tokenizer = CLIPTokenizerFast.from_pretrained(clip_model_id, local_files_only=True)
-    clip_model = CLIPTextModelWithProjection.from_pretrained(clip_model_id, local_files_only=True)
+    # In offline Pi deployments, disable background safetensors conversion attempts.
+    os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
+
+    prev_hf_verbosity = hf_logging.get_verbosity()
+    prev_progress_enabled = hf_logging.is_progress_bar_enabled()
+    hf_logging.set_verbosity_error()
+    hf_logging.disable_progress_bar()
+    try:
+        tokenizer = CLIPTokenizerFast.from_pretrained(clip_model_id, local_files_only=True)
+        clip_model = CLIPTextModelWithProjection.from_pretrained(
+            clip_model_id,
+            local_files_only=True,
+            use_safetensors=False,
+        )
+    finally:
+        if prev_progress_enabled:
+            hf_logging.enable_progress_bar()
+        hf_logging.set_verbosity(prev_hf_verbosity)
     clip_model.eval()
 
     prompts = [prompt_template.format(text) for text in class_texts]

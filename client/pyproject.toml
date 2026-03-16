@@ -6,7 +6,7 @@ requires-python = ">=3.10,<3.11"
 dependencies = [
     "numpy<2",
     "requests",
-    "opencv-python>=4.11.0.86",
+    "opencv-python>4.11",
     "lerobot",
     "lerobot[feetech]",
     "lerobot[lekiwi]",
