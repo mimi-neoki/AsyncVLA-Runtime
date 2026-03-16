@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from asyncvla_pi.edge_adapter_model import load_edge_adapter_from_hf_snapshot
+from asyncvla_pi.policy_payload import build_policy_payload
 
 TASK_MODE_CHOICES = [
     "auto",
@@ -191,23 +192,26 @@ def _make_image_blob(image_rgb: np.ndarray, quality: int) -> dict[str, Any]:
     }
 
 
-def _build_payload_template(args: argparse.Namespace, image_blob: dict[str, Any], goal_blob: dict[str, Any] | None) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "goal_pose": _build_goal_pose_payload(args),
-        "current_pose": [0.0, 0.0, 0.0],
-        "images": {args.image_key: image_blob},
-    }
-
+def _build_payload_template(
+    args: argparse.Namespace,
+    image_rgb: np.ndarray,
+    image_blob: dict[str, Any],
+    goal_blob: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = build_policy_payload(
+        image=image_rgb,
+        encoded_image=str(image_blob["data"]),
+        current_pose=[0.0, 0.0, 0.0],
+        goal_pose=_build_goal_pose_payload(args),
+        instruction=args.instruction,
+        task_mode=args.task_mode,
+        task_id=args.task_id,
+        satellite=args.satellite,
+        image_key=args.image_key,
+        metric_waypoint_spacing=float(args.metric_waypoint_spacing),
+    )
     if goal_blob is not None:
         payload["images"][args.goal_image_key] = goal_blob
-    if args.instruction is not None:
-        payload["instruction"] = str(args.instruction)
-    if args.task_mode is not None:
-        payload["task_mode"] = str(args.task_mode)
-    if args.task_id is not None:
-        payload["task_id"] = int(args.task_id)
-    if args.satellite is not None:
-        payload["satellite"] = bool(args.satellite)
     return payload
 
 
@@ -527,13 +531,22 @@ def main() -> int:
     elif args.include_goal_image:
         goal_blob = dict(image_blob)
 
-    payload_template = _build_payload_template(args, image_blob=image_blob, goal_blob=goal_blob)
+    payload_template = _build_payload_template(
+        args,
+        image_rgb=image_rgb,
+        image_blob=image_blob,
+        goal_blob=goal_blob,
+    )
 
     print(f"policy_url: {args.policy_url}")
     print(f"input_profile: {args.input_profile}")
     print(f"image: {image_source}")
     print(f"image_key: {args.image_key} shape={tuple(image_rgb.shape)}")
-    print(f"goal_pose_payload: {payload_template['goal_pose']}")
+    goal_pose_payload = payload_template.get("goal_pose")
+    if goal_pose_payload is not None:
+        print(f"goal_pose_payload: {goal_pose_payload}")
+    else:
+        print("goal_pose_payload: disabled_for_task_mode")
     if args.task_mode is not None:
         print(f"task_mode: {args.task_mode}")
     if args.instruction is not None:

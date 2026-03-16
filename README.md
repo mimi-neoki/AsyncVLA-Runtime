@@ -26,6 +26,7 @@ cd ..
 git clone https://github.com/mimi-neoki/AsyncVLA.git
 git clone https://github.com/mimi-neoki/AsyncVLA-Runtime.git
 cd AsyncVLA-Runtime
+git submodule update --init --recursive
 ```
 
 ## 3. Environment Setup with `uv`
@@ -48,13 +49,13 @@ uv sync --project client
 
 ```bash
 UV_PROJECT_ENVIRONMENT=.venv.server uv sync --extra server --extra test
-UV_PROJECT_ENVIRONMENT=.venv.client uv sync --project client
+UV_PROJECT_ENVIRONMENT=$PWD/.venv.client uv sync --project client
 ```
 
 Then use the corresponding Python interpreter for each side:
 
 - Server: `.venv.server/bin/python`
-- Client: `.venv.client/bin/python`
+- Client: `$PWD/.venv.client/bin/python`
 
 ## 4. Raspberry Pi 5 + HailoRT Setup
 
@@ -68,7 +69,7 @@ Place the wheel in the repository root before syncing the client project.
 If you already created `.venv.client` without it, you can also install manually:
 
 ```bash
-.venv.client/bin/pip install hailort-5.2.0-cp310-cp310-linux_aarch64.whl
+$PWD/.venv.client/bin/pip install hailort-5.2.0-cp310-cp310-linux_aarch64.whl
 ```
 
 `hailort-5.2.0-cp310-cp310-linux_aarch64.whl` can be obtained from the **Hailo Developer Zone**.
@@ -87,14 +88,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv.server/bin/pytest -q
 ### Client environment
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venv.client uv sync --project client
-.venv.client/bin/python -c "import cv2; print(cv2.__version__)"
+UV_PROJECT_ENVIRONMENT=$PWD/.venv.client uv sync --project client
+$PWD/.venv.client/bin/python -c "import cv2; print(cv2.__version__)"
 ```
 
 After installing HailoRT wheel:
 
 ```bash
-.venv.client/bin/python -c "import hailo_platform; print('hailo_platform OK')"
+$PWD/.venv.client/bin/python -c "import hailo_platform; print('hailo_platform OK')"
 ```
 
 ## 6. Run Commands
@@ -117,7 +118,7 @@ If you face a CUDA OOM, you can use ```--quantization 8bit```
 ### Start Pi edge client (Raspberry Pi 5)
 
 ```bash
-PYTHONPATH=. .venv.client/bin/python scripts/run_pi_edge_client.py \
+PYTHONPATH=. $PWD/.venv.client/bin/python scripts/run_pi_edge_client.py \
   --policy-url http://<server-ip>:8000/infer \
   --hef models/edge_adapter_v520.hef
 ```
