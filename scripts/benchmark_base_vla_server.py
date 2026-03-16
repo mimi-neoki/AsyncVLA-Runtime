@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-seed", type=int, default=0)
     parser.add_argument("--jpeg-quality", type=int, default=85)
     parser.add_argument("--asyncvla-repo-dir", default="~/gitrepo/AsyncVLA")
-    parser.add_argument("--hf-dir", default="~/huggingface/AsyncVLA_release")
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
     parser.add_argument("--save-visualization", default="artifacts/benchmark_base_vla_server_result.png")
     parser.add_argument("--metric-waypoint-spacing", type=float, default=0.1)
 

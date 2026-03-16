@@ -39,7 +39,7 @@ TASK_MODE_TO_ID = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare official AsyncVLA demo path and runtime path outputs")
-    parser.add_argument("--hf-dir", default="~/huggingface/AsyncVLA_release")
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
     parser.add_argument("--asyncvla-repo-dir", default="~/gitrepo/AsyncVLA")
     parser.add_argument("--device", default="mps")
     parser.add_argument("--dtype", default="float16")

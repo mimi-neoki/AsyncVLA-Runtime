@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare TorchEdgeRunner and HailoEdgeRunner outputs for the same inputs."
     )
-    parser.add_argument("--hf-dir", default="~/huggingface/AsyncVLA_release")
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
     parser.add_argument("--hef", default="models/edge_adapter_v520.hef")
     parser.add_argument("--current-image", default=None, help="RGB current image path (png/jpg).")
     parser.add_argument("--delayed-image", default=None, help="RGB delayed/past image path (png/jpg).")
