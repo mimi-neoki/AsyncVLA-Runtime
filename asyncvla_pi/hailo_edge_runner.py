@@ -265,6 +265,11 @@ class HailoEdgeRunner:
             qinfo = quant_infos[0]
             scale = float(qinfo.qp_scale)
             zp = float(qinfo.qp_zp)
+            # print(f"quant_infos count: {len(quant_infos)}")
+            # print(f"qp_scale={scale}, qp_zp={zp}")
+            # print(f"raw uint8 stats: min={output.min()}, max={output.max()}, mean={output.mean():.2f}")
+            # dequantized = (np.asarray(output, dtype=np.float32) - zp) * scale
+            # print(f"dequantized stats: min={dequantized.min():.4f}, max={dequantized.max():.4f}, mean={dequantized.mean():.4f}")
             return (np.asarray(output, dtype=np.float32) - zp) * scale
         except Exception:
             # Fall back to plain cast if quant metadata is unavailable.

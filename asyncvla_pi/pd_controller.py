@@ -11,9 +11,9 @@ import numpy as np
 class PDControllerConfig:
     kp_linear: float = 1.0
     kd_linear: float = 0.1
-    kp_heading: float = 2.0
+    kp_heading: float = 1.0
     kd_heading: float = 0.15
-    kp_yaw: float = 1.0
+    kp_yaw: float = 0.5
     max_linear: float = 0.6
     max_angular: float = 1.8
     dt_min: float = 1e-3

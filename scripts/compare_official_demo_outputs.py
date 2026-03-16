@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--goal-x", type=float, default=1.0)
     parser.add_argument("--goal-y", type=float, default=-10.0)
     parser.add_argument("--goal-yaw-deg", type=float, default=-90.0)
-    parser.add_argument("--instruction", default="move toward blue trash bin")
+    parser.add_argument("--instruction", default="move to plastic bottle")
     parser.add_argument("--modes", nargs="*", choices=sorted(TASK_MODE_TO_ID.keys()), default=sorted(TASK_MODE_TO_ID.keys()))
     parser.add_argument("--save-json", default="artifacts/compare_official_demo_outputs.json")
     return parser.parse_args()
@@ -101,8 +101,8 @@ def _get_next_actions_mask(token_ids: torch.Tensor) -> torch.Tensor:
 
 def _load_demo_images(asyncvla_repo_dir: Path) -> tuple[Image.Image, Image.Image, Image.Image]:
     inference_dir = asyncvla_repo_dir / "inference"
-    past = Image.open(inference_dir / "past.png").convert("RGB").resize((224, 224), Image.BILINEAR)
-    goal = Image.open(inference_dir / "goal.png").convert("RGB").resize((224, 224), Image.BILINEAR)
+    past = Image.open(inference_dir / "past.jpg").convert("RGB").resize((224, 224), Image.BILINEAR)
+    goal = Image.open(inference_dir / "goal.jpg").convert("RGB").resize((224, 224), Image.BILINEAR)
     cur = Image.open(inference_dir / "cur.png").convert("RGB").resize((224, 224), Image.BILINEAR)
     return past, goal, cur
 

@@ -206,14 +206,16 @@ class EdgeAwareRobotClient:
                 delayed = self.ring_buffer.nearest(guidance.timestamp_ns, max_delta_ns=max_delta_ns)
                 if delayed is not None:
                     goal_pose = np.asarray(obs.get(self.config.goal_pose_key, [0, 0, 0]), dtype=np.float32)
-                    current_pose = np.asarray(obs.get(self.config.current_pose_key, [0, 0, 0]), dtype=np.float32)
-                    pose_chunk = self.edge_runner.infer(
+                    raw_out = self.edge_runner.infer(
                         current_image=current_image,
                         delayed_image=delayed.frame,
                         projected_tokens=guidance.projected_tokens,
                         goal_pose=goal_pose,
                     )
-                    cmd = self.pd_controller.cmd_from_pose_chunk(current_pose=current_pose, pose_chunk=pose_chunk)
+                    cmd = self.pd_controller.compute_cmd(
+                        pose_chunk=raw_out,
+                        metric_waypoint_spacing=self.config.metric_waypoint_spacing,
+                    )
                     self.robot.send_action(cmd)
 
             sleep_s = max(0.0, period - (time.monotonic() - started))
