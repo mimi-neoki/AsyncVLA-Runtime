@@ -20,6 +20,8 @@ from asyncvla_pi import (
     HailoEdgeRunnerConfig,
     PDController,
     PDControllerConfig,
+    TorchEdgeRunner,
+    TorchEdgeRunnerConfig,
 )
 from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig, TwistCommand
 
@@ -27,7 +29,11 @@ from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig, TwistCo
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Pi-side edge adapter client and connect to base-VLA server")
     parser.add_argument("--policy-url", required=True, help="e.g. http://<gpu-server-ip>:8000/infer")
+    parser.add_argument("--edge-backend", choices=["hef", "hf"], default="hef")
     parser.add_argument("--hef", default="models/edge_adapter_v520.hef")
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
+    parser.add_argument("--edge-device", default="cpu", help="Used only when --edge-backend=hf")
+    parser.add_argument("--edge-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
@@ -132,7 +138,8 @@ def _ensure_hailo_runtime_available() -> None:
 
 def main() -> None:
     args = parse_args()
-    _ensure_hailo_runtime_available()
+    if args.edge_backend == "hef":
+        _ensure_hailo_runtime_available()
     libcamerify_active = os.environ.get("ASYNCVLA_LIBCAMERIFY_ACTIVE") == "1"
     if args.libcamerify == "on" and not libcamerify_active:
         _reexec_with_libcamerify()
@@ -140,8 +147,11 @@ def main() -> None:
         _reexec_with_libcamerify()
 
     hef_path = Path(args.hef).expanduser().resolve()
-    if not hef_path.exists():
+    hf_dir = Path(args.hf_dir).expanduser().resolve()
+    if args.edge_backend == "hef" and not hef_path.exists():
         raise FileNotFoundError(f"HEF not found: {hef_path}")
+    if args.edge_backend == "hf" and not hf_dir.exists():
+        raise FileNotFoundError(f"HF directory not found: {hf_dir}")
 
     goal_pose = np.array([args.goal_x, args.goal_y, args.goal_yaw], dtype=np.float32)
 
@@ -168,26 +178,42 @@ def main() -> None:
         cmd_vel_publisher=cmd_publisher,
     )
 
-    edge_runner = HailoEdgeRunner(
-        HailoEdgeRunnerConfig(
-            hef_path=str(hef_path),
-            input_current_image=args.input_current_name,
-            input_delayed_image=args.input_delayed_name,
-            input_projected_tokens=args.input_tokens_name,
-            input_goal_pose=None,
-            output_action_chunk=args.output_chunk_name,
-            image_height=96,
-            image_width=96,
-            chunk_size=8,
-            pose_dim=4,
-            image_layout=args.image_layout,
-            input_format_type=args.input_format,
-            output_format_type=args.output_format,
-            normalize_imagenet=args.normalize_imagenet,
-            image_scale_255=args.image_scale_255,
-            convert_bgr_to_rgb=True,
+    if args.edge_backend == "hef":
+        edge_runner = HailoEdgeRunner(
+            HailoEdgeRunnerConfig(
+                hef_path=str(hef_path),
+                input_current_image=args.input_current_name,
+                input_delayed_image=args.input_delayed_name,
+                input_projected_tokens=args.input_tokens_name,
+                input_goal_pose=None,
+                output_action_chunk=args.output_chunk_name,
+                image_height=96,
+                image_width=96,
+                chunk_size=8,
+                pose_dim=4,
+                image_layout=args.image_layout,
+                input_format_type=args.input_format,
+                output_format_type=args.output_format,
+                normalize_imagenet=args.normalize_imagenet,
+                image_scale_255=args.image_scale_255,
+                convert_bgr_to_rgb=True,
+            )
         )
-    )
+    else:
+        if TorchEdgeRunner is None or TorchEdgeRunnerConfig is None:
+            raise RuntimeError("TorchEdgeRunner is unavailable. Install torch dependencies for --edge-backend=hf.")
+        edge_runner = TorchEdgeRunner(
+            TorchEdgeRunnerConfig(
+                hf_dir=str(hf_dir),
+                image_height=96,
+                image_width=96,
+                normalize_imagenet=args.normalize_imagenet,
+                image_scale_255=True,
+                convert_bgr_to_rgb=True,
+                device=args.edge_device,
+                dtype=args.edge_dtype,
+            )
+        )
 
     client = EdgeAwareRobotClient(
         robot=robot,
@@ -208,7 +234,13 @@ def main() -> None:
 
     print("Pi edge client start")
     print(f"policy_url={args.policy_url}")
-    print(f"hef={hef_path}")
+    print(f"edge_backend={args.edge_backend}")
+    if args.edge_backend == "hef":
+        print(f"hef={hef_path}")
+    else:
+        print(f"hf_dir={hf_dir}")
+        print(f"edge_device={args.edge_device}")
+        print(f"edge_dtype={args.edge_dtype}")
     if args.instruction is not None:
         print(f"instruction={args.instruction}")
     if args.task_mode is not None:

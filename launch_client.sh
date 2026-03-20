@@ -4,8 +4,14 @@ set -euo pipefail
 OBJECT_CHECK_MODE="${1:-off}"
 YOLO_CONF_THRES="${YOLO_CONF_THRES:-0.50}"
 INSTRUCTION_INPUT_MODE="${INSTRUCTION_INPUT_MODE:-gui}"
+EDGE_BACKEND="${EDGE_BACKEND:-hef}"
+EDGE_DEVICE="${EDGE_DEVICE:-cpu}"
+EDGE_DTYPE="${EDGE_DTYPE:-float32}"
+EDGE_HEF_PATH="${EDGE_HEF_PATH:-models/edge_adapter_accuracy_calib.hef}"
+EDGE_HF_DIR="${EDGE_HF_DIR:-$HOME/gitrepo/AsyncVLA_release}"
 INSTRUCTION_INPUT_FLAGS=()
 OBJECT_CHECK_FLAGS=()
+EDGE_BACKEND_FLAGS=()
 case "${INSTRUCTION_INPUT_MODE}" in
   stdin)
     ;;
@@ -31,6 +37,27 @@ case "${OBJECT_CHECK_MODE}" in
     ;;
 esac
 
+case "${EDGE_BACKEND}" in
+  hef)
+    EDGE_BACKEND_FLAGS=(
+      --edge-backend hef
+      --hef "${EDGE_HEF_PATH}"
+    )
+    ;;
+  hf)
+    EDGE_BACKEND_FLAGS=(
+      --edge-backend hf
+      --hf-dir "${EDGE_HF_DIR}"
+      --edge-device "${EDGE_DEVICE}"
+      --edge-dtype "${EDGE_DTYPE}"
+    )
+    ;;
+  *)
+    echo "EDGE_BACKEND must be hef or hf (got: ${EDGE_BACKEND})" >&2
+    exit 1
+    ;;
+esac
+
 # uv run scripts/demo_edge_server_visual.py \
 echo "Runtime instruction update is enabled."
 if [[ "${INSTRUCTION_INPUT_MODE}" == "gui" ]]; then
@@ -40,6 +67,14 @@ else
 fi
 echo "Object check mode: ${OBJECT_CHECK_MODE}"
 echo "Instruction input mode: ${INSTRUCTION_INPUT_MODE}"
+echo "Edge backend: ${EDGE_BACKEND}"
+if [[ "${EDGE_BACKEND}" == "hef" ]]; then
+  echo "Edge HEF: ${EDGE_HEF_PATH}"
+else
+  echo "Edge HF dir: ${EDGE_HF_DIR}"
+  echo "Edge device: ${EDGE_DEVICE}"
+  echo "Edge dtype: ${EDGE_DTYPE}"
+fi
 echo "Each instruction update updates target noun phrase for policy instruction."
 echo "Mode=off: object check disabled (instruction updates only affect path generation)."
 echo "Mode=not_found_only: periodic check only while NOT FOUND."
@@ -48,9 +83,9 @@ echo "If NOT FOUND, LeKiwi rotates in place until FOUND (only for non-off modes)
 
 client/.venv.client/bin/python scripts/demo_lekiwi_client.py \
     --policy-url http://0.0.0.0:8000/infer \
-    --hef models/edge_adapter_accuracy_calib.hef \
     --instruction-verb "move to" \
     --instruction-noun "black bag" \
+    "${EDGE_BACKEND_FLAGS[@]}" \
     "${INSTRUCTION_INPUT_FLAGS[@]}" \
     "${OBJECT_CHECK_FLAGS[@]}" \
     --yolo-hef models/yolo_world_v2s.hef \

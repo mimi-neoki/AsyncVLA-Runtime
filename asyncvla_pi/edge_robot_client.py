@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 
-from .hailo_edge_runner import HailoEdgeRunner
 from .image_ring_buffer import ImageRingBuffer
 from .pd_controller import PDController
 from .policy_payload import build_policy_payload
@@ -62,7 +61,7 @@ class EdgeAwareRobotClient:
     def __init__(
         self,
         robot: Any,
-        edge_runner: HailoEdgeRunner,
+        edge_runner: Any,
         pd_controller: PDController,
         config: EdgeRobotClientConfig,
     ) -> None:
