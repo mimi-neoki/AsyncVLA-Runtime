@@ -30,6 +30,8 @@ class HailoEdgeRunnerConfig:
     output_format_type: str = "float32"
     image_scale_255: bool = True
     convert_bgr_to_rgb: bool = False
+    # Historical name kept for compatibility; this now controls token quantization
+    # for both uint8 and int8 input modes.
     token_uint8_mode: str = "dynamic_minmax"
 
 
@@ -55,6 +57,7 @@ class HailoEdgeRunner:
         self._owns_target = target is None
         self._infer_model: Any = None
         self._configured_infer_model: Any = None
+        self._quant_info_model: Any = None
         self._mode: str = "vstreams"
         self._resolved_input_current_name: str = config.input_current_image
         self._resolved_input_delayed_name: str = config.input_delayed_image
@@ -70,6 +73,27 @@ class HailoEdgeRunner:
         x_idx = np.linspace(0, w - 1, self.config.image_width).astype(np.int32)
         return image[np.ix_(y_idx, x_idx)]
 
+    def _input_format_name(self) -> str:
+        return self.config.input_format_type.strip().lower()
+
+    @staticmethod
+    def _quantize_signed_dynamic_minmax(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float32)
+        v_min = arr.min(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        v_max = arr.max(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        denom = np.maximum(v_max - v_min, 1e-6)
+        scaled = (arr - v_min) / denom * 255.0 - 128.0
+        return np.clip(np.round(scaled), -128, 127).astype(np.int8)
+
+    @staticmethod
+    def _quantize_unsigned_dynamic_minmax(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float32)
+        v_min = arr.min(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        v_max = arr.max(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        denom = np.maximum(v_max - v_min, 1e-6)
+        scaled = (arr - v_min) / denom * 255.0
+        return np.clip(np.round(scaled), 0, 255).astype(np.uint8)
+
     def _prep_image(self, image: np.ndarray) -> np.ndarray:
         arr = np.asarray(image)
         if arr.ndim != 3:
@@ -82,13 +106,16 @@ class HailoEdgeRunner:
             else:
                 arr = arr[..., ::-1]
         resized = self._resize(arr)
-        if self.config.input_format_type.lower() in {"uint8", "auto"}:
+        format_name = self._input_format_name()
+        if format_name in {"uint8", "auto"}:
             data = resized.astype(np.uint8)
+        elif format_name == "int8":
+            data = np.clip(resized.astype(np.int16) - 128, -128, 127).astype(np.int8)
         else:
             data = resized.astype(np.float32)
-        if self.config.image_scale_255 and data.dtype != np.uint8 and data.max() > 1.0:
+        if self.config.image_scale_255 and not np.issubdtype(data.dtype, np.integer) and data.max() > 1.0:
             data = data / 255.0
-        if self.config.normalize_imagenet and data.dtype != np.uint8:
+        if self.config.normalize_imagenet and not np.issubdtype(data.dtype, np.integer):
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
             std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
             data = (data - mean) / std
@@ -102,17 +129,19 @@ class HailoEdgeRunner:
         tokens = np.asarray(projected_tokens)
         if tokens.ndim == 2:
             tokens = tokens[None, ...]
-        if self.config.input_format_type.lower() not in {"uint8", "auto"}:
+        format_name = self._input_format_name()
+        if format_name not in {"uint8", "int8", "auto"}:
             return tokens.astype(np.float32)
-        if tokens.dtype == np.uint8:
+        if format_name in {"uint8", "auto"} and tokens.dtype == np.uint8:
+            return tokens
+        if format_name == "int8" and tokens.dtype == np.int8:
             return tokens
         if self.config.token_uint8_mode == "dynamic_minmax":
-            t = tokens.astype(np.float32)
-            t_min = t.min(axis=(1, 2), keepdims=True)
-            t_max = t.max(axis=(1, 2), keepdims=True)
-            denom = np.maximum(t_max - t_min, 1e-6)
-            q = np.clip(np.round((t - t_min) / denom * 255.0), 0, 255).astype(np.uint8)
-            return q
+            if format_name == "int8":
+                return self._quantize_signed_dynamic_minmax(tokens)
+            return self._quantize_unsigned_dynamic_minmax(tokens)
+        if format_name == "int8":
+            return np.clip(np.round(tokens), -128, 127).astype(np.int8)
         return np.clip(np.round(tokens), 0, 255).astype(np.uint8)
 
     def _build_inputs(
@@ -141,6 +170,8 @@ class HailoEdgeRunner:
         name = format_type_name.strip().lower()
         if name == "float32":
             return format_enum.FLOAT32
+        if name == "int8":
+            return format_enum.INT8
         if name == "uint8":
             return format_enum.UINT8
         if name == "auto":
@@ -218,6 +249,11 @@ class HailoEdgeRunner:
             target = VDevice()
             self._target = target
             self._owns_target = True
+        # Keep an InferModel handle for quant metadata even when VStreams is used.
+        try:
+            self._quant_info_model = target.create_infer_model(hef_path)
+        except Exception:
+            self._quant_info_model = None
 
         # Preferred path: VStreams. Some Hailo10H + HEF combinations may raise
         # HAILO_NOT_IMPLEMENTED on configure, so fallback to InferModel API.
@@ -246,7 +282,10 @@ class HailoEdgeRunner:
                 # Try InferModel fallback regardless; if it fails we re-raise later.
                 pass
 
-        infer_model = target.create_infer_model(hef_path)
+        infer_model = self._quant_info_model
+        if infer_model is None:
+            infer_model = target.create_infer_model(hef_path)
+            self._quant_info_model = infer_model
         configured = infer_model.configure()
         self._infer_model = infer_model
         self._configured_infer_model = configured
@@ -254,26 +293,34 @@ class HailoEdgeRunner:
         self._mode = "infer_model"
         self._ready = True
 
-    def _dequantize_infer_model_output(self, output_name: str, output: np.ndarray) -> np.ndarray:
-        """InferModel path may return quantized buffers even when float output is requested."""
-        if self.config.output_format_type.lower() != "float32":
+    def _get_output_quant_info(self, output_name: str) -> tuple[float, float] | None:
+        model = self._infer_model if self._infer_model is not None else self._quant_info_model
+        if model is None:
+            return None
+        candidate_names = [output_name, self._resolved_output_name, self.config.output_action_chunk]
+        seen: set[str] = set()
+        for name in candidate_names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            try:
+                quant_infos = model.output(name).quant_infos
+            except Exception:
+                continue
+            if quant_infos:
+                qinfo = quant_infos[0]
+                return float(qinfo.qp_scale), float(qinfo.qp_zp)
+        return None
+
+    def _dequantize_output(self, output_name: str, output: np.ndarray) -> np.ndarray:
+        """Dequantize integer output buffers to float32 using Hailo quant metadata."""
+        if not np.issubdtype(np.asarray(output).dtype, np.integer):
             return np.asarray(output, dtype=np.float32)
-        try:
-            quant_infos = self._infer_model.output(output_name).quant_infos
-            if not quant_infos:
-                return np.asarray(output, dtype=np.float32)
-            qinfo = quant_infos[0]
-            scale = float(qinfo.qp_scale)
-            zp = float(qinfo.qp_zp)
-            # print(f"quant_infos count: {len(quant_infos)}")
-            # print(f"qp_scale={scale}, qp_zp={zp}")
-            # print(f"raw uint8 stats: min={output.min()}, max={output.max()}, mean={output.mean():.2f}")
-            # dequantized = (np.asarray(output, dtype=np.float32) - zp) * scale
-            # print(f"dequantized stats: min={dequantized.min():.4f}, max={dequantized.max():.4f}, mean={dequantized.mean():.4f}")
-            return (np.asarray(output, dtype=np.float32) - zp) * scale
-        except Exception:
-            # Fall back to plain cast if quant metadata is unavailable.
+        qinfo = self._get_output_quant_info(output_name)
+        if qinfo is None:
             return np.asarray(output, dtype=np.float32)
+        scale, zp = qinfo
+        return (np.asarray(output, dtype=np.float32) - zp) * scale
 
     @staticmethod
     def _align_rank_for_infer_model(array: np.ndarray, expected_rank: int) -> np.ndarray:
@@ -326,20 +373,31 @@ class HailoEdgeRunner:
                 output_name = self._infer_model.output_names[0]
             out_shape = tuple(self._infer_model.output(output_name).shape)
             # InferModel expects a native-quantized buffer shape/size.
-            # Use UINT8 buffer and dequantize manually when float output is requested.
+            # Use a quantized integer buffer and dequantize manually when float output is requested.
             if self.config.output_format_type.lower() == "float32":
                 out_dtype = np.uint8
             else:
-                out_dtype = np.uint8 if self.config.output_format_type.lower() in {"uint8", "auto"} else np.float32
+                if self.config.output_format_type.lower() == "int8":
+                    out_dtype = np.int8
+                elif self.config.output_format_type.lower() in {"uint8", "auto"}:
+                    out_dtype = np.uint8
+                else:
+                    out_dtype = np.float32
             out_buf = np.empty(out_shape, dtype=out_dtype)
             bindings.output(output_name).set_buffer(out_buf)
             configured.run([bindings], 10000)
             output = out_buf
 
         if self._mode == "infer_model":
-            output = self._dequantize_infer_model_output(output_name, output)
+            if self.config.output_format_type.lower() == "float32":
+                output = self._dequantize_output(output_name, output)
+            else:
+                output = np.asarray(output, dtype=np.float32)
         else:
-            output = np.asarray(output, dtype=np.float32)
+            if self.config.output_format_type.lower() == "float32":
+                output = self._dequantize_output(self._resolved_output_name, output)
+            else:
+                output = np.asarray(output, dtype=np.float32)
         if output.ndim == 3 and output.shape[1] == 1 and output.shape[0] == self.config.chunk_size:
             output = output.reshape(1, self.config.chunk_size, -1)
         if output.ndim == 2:
@@ -354,6 +412,7 @@ class HailoEdgeRunner:
         self._infer_pipeline = None
         self._infer_model = None
         self._configured_infer_model = None
+        self._quant_info_model = None
         self._ready = False
         if self._owns_target:
             self._target = None

@@ -253,8 +253,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-tokens-name", default="edge/input_layer3")
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
-    parser.add_argument("--input-format", choices=["uint8", "float32", "auto"], default="uint8")
-    parser.add_argument("--output-format", choices=["uint8", "float32", "auto"], default="auto")
+    parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
+    parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="auto")
     parser.add_argument("--normalize-imagenet", action="store_true")
     parser.add_argument("--image-scale-255", action="store_true")
 

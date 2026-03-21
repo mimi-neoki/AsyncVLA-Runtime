@@ -54,8 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-goal-name", default=None)
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
-    parser.add_argument("--input-format", choices=["uint8", "float32", "auto"], default="uint8")
-    parser.add_argument("--output-format", choices=["uint8", "float32", "auto"], default="auto")
+    parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
+    parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="auto")
 
     parser.add_argument("--allclose-rtol", type=float, default=1e-2)
     parser.add_argument("--allclose-atol", type=float, default=1e-2)

@@ -31,6 +31,8 @@ class TorchEdgeRunnerConfig:
     convert_bgr_to_rgb: bool = False
     device: str = "cpu"
     dtype: str = "float32"
+    preprocess_mode: str = "hf"
+    token_uint8_mode: str = "dynamic_minmax"
 
 
 class TorchEdgeRunner:
@@ -74,6 +76,15 @@ class TorchEdgeRunner:
         x_idx = np.linspace(0, w - 1, self.config.image_width).astype(np.int32)
         return image[np.ix_(y_idx, x_idx)]
 
+    @staticmethod
+    def _quantize_unsigned_dynamic_minmax(values: np.ndarray) -> np.ndarray:
+        arr = np.asarray(values, dtype=np.float32)
+        v_min = arr.min(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        v_max = arr.max(axis=tuple(range(1, arr.ndim)), keepdims=True)
+        denom = np.maximum(v_max - v_min, 1e-6)
+        scaled = (arr - v_min) / denom * 255.0
+        return np.clip(np.round(scaled), 0, 255).astype(np.uint8)
+
     def _prep_image(self, image: np.ndarray) -> Any:
         arr = np.asarray(image)
         if arr.ndim != 3:
@@ -86,12 +97,18 @@ class TorchEdgeRunner:
             else:
                 arr = arr[..., ::-1]
         resized = self._resize(arr).astype(np.float32)
-        if self.config.image_scale_255 and resized.max() > 1.0:
-            resized = resized / 255.0
-        if self.config.normalize_imagenet:
-            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-            resized = (resized - mean) / std
+        preprocess_mode = self.config.preprocess_mode.strip().lower()
+        if preprocess_mode == "hf":
+            if self.config.image_scale_255 and resized.max() > 1.0:
+                resized = resized / 255.0
+            if self.config.normalize_imagenet:
+                mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+                std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+                resized = (resized - mean) / std
+        elif preprocess_mode == "hailo_int8norm":
+            resized = resized - 128.0
+        else:
+            raise ValueError(f"Unsupported preprocess_mode: {self.config.preprocess_mode}")
         chw = np.transpose(resized, (2, 0, 1))[None, ...]
         return torch.from_numpy(chw).to(device=self.device, dtype=self.dtype)
 
@@ -99,6 +116,15 @@ class TorchEdgeRunner:
         tokens = np.asarray(projected_tokens, dtype=np.float32)
         if tokens.ndim == 2:
             tokens = tokens[None, ...]
+        preprocess_mode = self.config.preprocess_mode.strip().lower()
+        if preprocess_mode == "hailo_int8norm":
+            if self.config.token_uint8_mode == "dynamic_minmax":
+                tokens = self._quantize_unsigned_dynamic_minmax(tokens)
+            else:
+                tokens = np.clip(np.round(tokens), 0, 255).astype(np.uint8)
+            tokens = tokens.astype(np.float32) - 128.0
+        elif preprocess_mode != "hf":
+            raise ValueError(f"Unsupported preprocess_mode: {self.config.preprocess_mode}")
         return torch.from_numpy(tokens).to(device=self.device, dtype=self.dtype)
 
     def infer(

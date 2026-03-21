@@ -164,6 +164,7 @@ class EdgeCompareService:
                 convert_bgr_to_rgb=args.convert_bgr_to_rgb,
                 device=args.torch_device,
                 dtype=args.torch_dtype,
+                preprocess_mode=args.torch_preprocess_mode,
             )
         )
         self._hailo_runner_kwargs["chunk_size"] = int(self.torch_runner.model.action_chunk_size)
@@ -355,17 +356,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-width", type=int, default=96)
     parser.add_argument("--torch-device", default="cpu")
     parser.add_argument("--torch-dtype", choices=["float32", "float16", "bfloat16"], default="float32")
+    parser.add_argument(
+        "--torch-preprocess-mode",
+        choices=["hf", "hailo_int8norm"],
+        default="hf",
+        help="Torch-side preprocessing used for comparison. 'hf' compares against the original HF model input domain.",
+    )
     parser.add_argument("--convert-bgr-to-rgb", action="store_true")
-    parser.add_argument("--normalize-imagenet", action="store_true")
-    parser.add_argument("--image-scale-255", action="store_true")
+    parser.add_argument("--normalize-imagenet", dest="normalize_imagenet", action="store_true")
+    parser.add_argument("--no-normalize-imagenet", dest="normalize_imagenet", action="store_false")
+    parser.set_defaults(normalize_imagenet=True)
+    parser.add_argument("--image-scale-255", dest="image_scale_255", action="store_true")
+    parser.add_argument("--no-image-scale-255", dest="image_scale_255", action="store_false")
+    parser.set_defaults(image_scale_255=True)
     parser.add_argument("--input-current-name", default="edge/input_layer1")
     parser.add_argument("--input-delayed-name", default="edge/input_layer2")
     parser.add_argument("--input-tokens-name", default="edge/input_layer3")
     parser.add_argument("--input-goal-name", default=None)
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
-    parser.add_argument("--input-format", choices=["uint8", "float32", "auto"], default="uint8")
-    parser.add_argument("--output-format", choices=["uint8", "float32", "auto"], default="auto")
+    parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
+    parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="float32")
     parser.add_argument(
         "--duplicate-current-as-delayed",
         action="store_true",
@@ -406,6 +417,7 @@ def main() -> None:
     print(f"HF snapshot: {hf_dir}")
     print(f"HEF: {hef_path if hef_path is not None else '(none; waiting for upload via POST /hef)'}")
     print(f"Torch device/dtype: {args.torch_device}/{args.torch_dtype}")
+    print(f"Torch preprocess mode: {args.torch_preprocess_mode}")
     print(
         "Preprocess: "
         f"convert_bgr_to_rgb={args.convert_bgr_to_rgb} "
