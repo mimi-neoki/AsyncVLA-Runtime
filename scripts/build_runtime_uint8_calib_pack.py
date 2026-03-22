@@ -2,9 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from asyncvla_pi.token_quant import load_token_quant_params, quantize_tokens_fixed_affine
 
 
 def parse_args() -> argparse.Namespace:
@@ -14,6 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calib-dir", default="calib_data")
     parser.add_argument("--num-samples", type=int, default=1024)
     parser.add_argument("--quant-dtype", choices=("uint8", "int8"), default="uint8")
+    parser.add_argument(
+        "--token-quant-mode",
+        choices=("dynamic_minmax", "fixed_affine"),
+        default="dynamic_minmax",
+    )
+    parser.add_argument("--token-quant-params", default=None)
     parser.add_argument(
         "--delayed-mode",
         choices=("roll", "same"),
@@ -66,7 +79,18 @@ def main() -> int:
     else:
         current_q = current_u8
         delayed_q = delayed_u8
-    projected_q = _quantize_tokens_dynamic_minmax(projected_tokens[:n], args.quant_dtype)[:, None, :, :]
+    if args.token_quant_mode == "fixed_affine":
+        if not args.token_quant_params:
+            raise ValueError("--token-quant-params is required for --token-quant-mode fixed_affine")
+        params = load_token_quant_params(args.token_quant_params)
+        projected_q = quantize_tokens_fixed_affine(
+            projected_tokens[:n],
+            quant_dtype=args.quant_dtype,
+            scales=np.asarray(params["scales"], dtype=np.float32),
+            zero_point=int(params["zero_point"]),
+        )[:, None, :, :]
+    else:
+        projected_q = _quantize_tokens_dynamic_minmax(projected_tokens[:n], args.quant_dtype)[:, None, :, :]
 
     output_name = args.output_name.format(n=n, mode=args.delayed_mode, dtype=args.quant_dtype)
     out_path = calib_dir / output_name
@@ -96,6 +120,9 @@ def main() -> int:
             "input_layer3": [int(projected_q.min()), int(projected_q.max())],
         },
     )
+    print("token_quant_mode:", args.token_quant_mode)
+    if args.token_quant_params:
+        print("token_quant_params:", str(Path(args.token_quant_params).expanduser().resolve()))
     return 0
 
 

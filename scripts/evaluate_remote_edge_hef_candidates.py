@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import sys
 import time
 from io import BytesIO
 from pathlib import Path
@@ -13,6 +14,12 @@ from urllib.parse import urlsplit, urlunsplit
 import numpy as np
 import requests
 from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from asyncvla_pi import TorchEdgeRunner, TorchEdgeRunnerConfig
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +47,24 @@ def parse_args() -> argparse.Namespace:
         help="roll_fullset matches calib_data generation: delayed image is previous sample in the full dataset.",
     )
     parser.add_argument("--jpeg-quality", type=int, default=90)
+    parser.add_argument(
+        "--compare-reference",
+        choices=["server", "local_torch"],
+        default="server",
+        help="How to compute diff_report. 'local_torch' compares remote HEF output against a local TorchEdgeRunner.",
+    )
+    parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
+    parser.add_argument("--torch-device", default="cuda")
+    parser.add_argument("--torch-dtype", choices=["float32", "float16", "bfloat16"], default="float16")
+    parser.add_argument(
+        "--torch-preprocess-mode",
+        choices=["hf", "hailo_int8norm"],
+        default="hf",
+    )
+    parser.add_argument("--token-quant-mode", choices=["dynamic_minmax", "fixed_affine", "none"], default="dynamic_minmax")
+    parser.add_argument("--token-quant-params", default=None)
+    parser.add_argument("--image-height", type=int, default=96)
+    parser.add_argument("--image-width", type=int, default=96)
 
     parser.add_argument("--hef", action="append", default=[], help="HEF path. Can be passed multiple times.")
     parser.add_argument("--hef-glob", default="", help="Optional glob such as 'build_fixed/*.hef'.")
@@ -105,6 +130,34 @@ def _mean(values: list[float]) -> float | None:
     if not values:
         return None
     return float(sum(values) / len(values))
+
+
+def _compare_outputs(ref: np.ndarray, test: np.ndarray) -> dict[str, Any]:
+    ref_arr = np.asarray(ref, dtype=np.float32)
+    test_arr = np.asarray(test, dtype=np.float32)
+    if ref_arr.shape != test_arr.shape:
+        return {
+            "shape_match": False,
+            "ref_shape": list(ref_arr.shape),
+            "test_shape": list(test_arr.shape),
+        }
+    diff = ref_arr - test_arr
+    ref_flat = ref_arr.reshape(-1)
+    test_flat = test_arr.reshape(-1)
+    denom = float(np.linalg.norm(ref_flat) * np.linalg.norm(test_flat))
+    cosine = float(np.dot(ref_flat, test_flat) / denom) if denom > 0.0 else 1.0
+    return {
+        "shape_match": True,
+        "shape": list(ref_arr.shape),
+        "max_abs": float(np.abs(diff).max()),
+        "mean_abs": float(np.abs(diff).mean()),
+        "rmse": float(np.sqrt(np.mean(np.square(diff)))),
+        "mean_signed": float(diff.mean()),
+        "cosine_similarity": cosine,
+        "allclose": bool(np.allclose(ref_arr, test_arr, rtol=1e-2, atol=1e-2)),
+        "allclose_rtol": 1e-2,
+        "allclose_atol": 1e-2,
+    }
 
 
 def _select_indices(total: int, num_samples: int, start_index: int, strategy: str, seed: int) -> list[int]:
@@ -239,6 +292,24 @@ def main() -> int:
     print(f"selected_samples: {len(indices)} / {len(samples)}")
     print(f"sample_indices_head: {indices[:10]}")
 
+    local_torch_runner: TorchEdgeRunner | None = None
+    if args.compare_reference == "local_torch":
+        local_torch_runner = TorchEdgeRunner(
+            TorchEdgeRunnerConfig(
+                hf_dir=args.hf_dir,
+                image_height=args.image_height,
+                image_width=args.image_width,
+                normalize_imagenet=True,
+                image_scale_255=True,
+                convert_bgr_to_rgb=False,
+                device=args.torch_device,
+                dtype=args.torch_dtype,
+                preprocess_mode=args.torch_preprocess_mode,
+                token_uint8_mode=args.token_quant_mode,
+                token_quant_params_path=args.token_quant_params,
+            )
+        )
+
     report: dict[str, Any] = {
         "edge_url": args.edge_url,
         "samples_json": str(samples_path),
@@ -277,13 +348,23 @@ def main() -> int:
                 continue
 
             body = _post_infer(args.edge_url, args.timeout_s, payload)
+            diff_report = body.get("diff_report", {})
+            if local_torch_runner is not None:
+                torch_ref = local_torch_runner.infer(
+                    current_image=current_rgb,
+                    delayed_image=delayed_rgb,
+                    projected_tokens=projected_tokens[idx],
+                    goal_pose=None,
+                )
+                hef_out = np.asarray(body.get("hef_action_chunk"), dtype=np.float32)
+                diff_report = _compare_outputs(torch_ref, hef_out)
             sample_results.append(
                 {
                     "sample_index": idx,
                     "instruction": sample.get("instruction"),
                     "current_image": str(current_path),
                     "delayed_image": str(delayed_path),
-                    "diff_report": body.get("diff_report", {}),
+                    "diff_report": diff_report,
                     "latency_ms": body.get("latency_ms", {}),
                     "hef_path": body.get("hef_path"),
                 }
@@ -324,6 +405,9 @@ def main() -> int:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         save_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"saved_json: {save_path}")
+
+    if local_torch_runner is not None:
+        local_torch_runner.close()
 
     return 0
 

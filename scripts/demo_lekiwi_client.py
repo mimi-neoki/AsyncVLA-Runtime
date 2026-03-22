@@ -186,6 +186,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
     parser.add_argument("--edge-device", default="cpu", help="Used only when --edge-backend=hf")
     parser.add_argument("--edge-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--torch-preprocess-mode", choices=["hf", "hailo_int8norm"], default="hf")
     parser.add_argument("--camera-index", default="0")
     parser.add_argument("--camera-width", type=int, default=640)
     parser.add_argument("--camera-height", type=int, default=480)
@@ -255,6 +256,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
     parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
     parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="auto")
+    parser.add_argument("--token-quant-mode", choices=["dynamic_minmax", "fixed_affine"], default="dynamic_minmax")
+    parser.add_argument("--token-quant-params", default=None)
     parser.add_argument("--normalize-imagenet", action="store_true")
     parser.add_argument("--image-scale-255", action="store_true")
 
@@ -667,6 +670,8 @@ def main() -> None:
                 normalize_imagenet=args.normalize_imagenet,
                 image_scale_255=args.image_scale_255,
                 convert_bgr_to_rgb=True,
+                token_uint8_mode=args.token_quant_mode,
+                token_quant_params_path=args.token_quant_params,
             ),
             target=shared_hailo_target,
         )
@@ -681,6 +686,9 @@ def main() -> None:
                 convert_bgr_to_rgb=True,
                 device=args.edge_device,
                 dtype=args.edge_dtype,
+                preprocess_mode=args.torch_preprocess_mode,
+                token_uint8_mode=args.token_quant_mode,
+                token_quant_params_path=args.token_quant_params,
             )
         )
 

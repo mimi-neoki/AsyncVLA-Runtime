@@ -150,6 +150,8 @@ class EdgeCompareService:
             "output_format_type": args.output_format,
             "image_scale_255": args.image_scale_255,
             "convert_bgr_to_rgb": args.convert_bgr_to_rgb,
+            "token_uint8_mode": args.token_quant_mode,
+            "token_quant_params_path": args.token_quant_params,
         }
 
         self.torch_runner = TorchEdgeRunner(
@@ -165,6 +167,8 @@ class EdgeCompareService:
                 device=args.torch_device,
                 dtype=args.torch_dtype,
                 preprocess_mode=args.torch_preprocess_mode,
+                token_uint8_mode=args.token_quant_mode,
+                token_quant_params_path=args.token_quant_params,
             )
         )
         self._hailo_runner_kwargs["chunk_size"] = int(self.torch_runner.model.action_chunk_size)
@@ -191,6 +195,8 @@ class EdgeCompareService:
                 output_format_type=str(self._hailo_runner_kwargs["output_format_type"]),
                 image_scale_255=bool(self._hailo_runner_kwargs["image_scale_255"]),
                 convert_bgr_to_rgb=bool(self._hailo_runner_kwargs["convert_bgr_to_rgb"]),
+                token_uint8_mode=str(self._hailo_runner_kwargs["token_uint8_mode"]),
+                token_quant_params_path=self._hailo_runner_kwargs["token_quant_params_path"],
             )
         )
 
@@ -377,6 +383,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
     parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
     parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="float32")
+    parser.add_argument("--token-quant-mode", choices=["dynamic_minmax", "fixed_affine"], default="dynamic_minmax")
+    parser.add_argument("--token-quant-params", default=None)
     parser.add_argument(
         "--duplicate-current-as-delayed",
         action="store_true",

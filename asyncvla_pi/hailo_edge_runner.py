@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .token_quant import load_token_quant_params, quantize_tokens_fixed_affine
+
 try:
     import cv2
 except Exception:  # pragma: no cover
@@ -33,6 +35,7 @@ class HailoEdgeRunnerConfig:
     # Historical name kept for compatibility; this now controls token quantization
     # for both uint8 and int8 input modes.
     token_uint8_mode: str = "dynamic_minmax"
+    token_quant_params_path: str | None = None
 
 
 class HailoEdgeRunner:
@@ -64,6 +67,9 @@ class HailoEdgeRunner:
         self._resolved_input_tokens_name: str = config.input_projected_tokens
         self._resolved_input_goal_name: str | None = config.input_goal_pose
         self._resolved_output_name: str = config.output_action_chunk
+        self._token_quant_params: dict[str, np.ndarray | float | int] | None = None
+        if config.token_quant_params_path:
+            self._token_quant_params = load_token_quant_params(config.token_quant_params_path)
 
     def _resize(self, image: np.ndarray) -> np.ndarray:
         if cv2 is not None:
@@ -136,10 +142,20 @@ class HailoEdgeRunner:
             return tokens
         if format_name == "int8" and tokens.dtype == np.int8:
             return tokens
-        if self.config.token_uint8_mode == "dynamic_minmax":
+        token_mode = self.config.token_uint8_mode.strip().lower()
+        if token_mode == "dynamic_minmax":
             if format_name == "int8":
                 return self._quantize_signed_dynamic_minmax(tokens)
             return self._quantize_unsigned_dynamic_minmax(tokens)
+        if token_mode == "fixed_affine":
+            if self._token_quant_params is None:
+                raise ValueError("token_uint8_mode='fixed_affine' requires token_quant_params_path")
+            return quantize_tokens_fixed_affine(
+                tokens,
+                quant_dtype="int8" if format_name == "int8" else "uint8",
+                scales=np.asarray(self._token_quant_params["scales"], dtype=np.float32),
+                zero_point=int(self._token_quant_params["zero_point"]),
+            )
         if format_name == "int8":
             return np.clip(np.round(tokens), -128, 127).astype(np.int8)
         return np.clip(np.round(tokens), 0, 255).astype(np.uint8)
