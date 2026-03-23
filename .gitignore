@@ -6,3 +6,5 @@ __pycache__/
 .venv.client/
 client/.venv/
 build/
+build_*/
+calib_data/

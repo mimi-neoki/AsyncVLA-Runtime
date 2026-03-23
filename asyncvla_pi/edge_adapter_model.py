@@ -185,6 +185,15 @@ class EdgeAdapter(nn.Module):
         past_img: torch.Tensor,
         vla_feature: torch.Tensor,
     ) -> torch.Tensor:
+        fused = self.encode_fused(obs_img, past_img, vla_feature)
+        return self.predict_action_from_fused(fused)
+
+    def encode_fused(
+        self,
+        obs_img: torch.Tensor,
+        past_img: torch.Tensor,
+        vla_feature: torch.Tensor,
+    ) -> torch.Tensor:
         cat_img = torch.cat((obs_img, past_img), dim=1)
 
         cat_encoding = self._encode_image(self.cat_encoder, cat_img)
@@ -195,9 +204,38 @@ class EdgeAdapter(nn.Module):
 
         tokens = torch.cat((vla_feature, obs_encoding.unsqueeze(1), cat_encoding.unsqueeze(1)), dim=1)
         tokens = self.decoder(tokens)[:, -2:-1, :]
-        fused = tokens.reshape(tokens.shape[0], -1)
+        return tokens.reshape(tokens.shape[0], -1)
+
+    def predict_action_from_fused(self, fused: torch.Tensor) -> torch.Tensor:
+        if fused.ndim == 3 and fused.shape[1] == 1:
+            fused = fused.reshape(fused.shape[0], -1)
+        if fused.ndim != 2:
+            raise ValueError(f"Expected fused latent shape [B, D] or [B, 1, D], got {tuple(fused.shape)}")
         action_pred = self.action_predictor(fused)
-        return action_pred.reshape(obs_img.shape[0], self.action_chunk_size, self.action_dim)
+        return action_pred.reshape(fused.shape[0], self.action_chunk_size, self.action_dim)
+
+
+class EdgeAdapterFusedBackbone(nn.Module):
+    def __init__(self, edge_adapter: EdgeAdapter) -> None:
+        super().__init__()
+        self.edge_adapter = edge_adapter
+
+    def forward(
+        self,
+        obs_img: torch.Tensor,
+        past_img: torch.Tensor,
+        vla_feature: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.edge_adapter.encode_fused(obs_img, past_img, vla_feature).unsqueeze(1)
+
+
+class EdgeAdapterActionHead(nn.Module):
+    def __init__(self, edge_adapter: EdgeAdapter) -> None:
+        super().__init__()
+        self.edge_adapter = edge_adapter
+
+    def forward(self, fused: torch.Tensor) -> torch.Tensor:
+        return self.edge_adapter.predict_action_from_fused(fused)
 
 
 def build_edge_adapter_from_state_dict(

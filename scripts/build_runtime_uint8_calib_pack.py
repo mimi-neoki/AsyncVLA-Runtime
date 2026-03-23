@@ -37,6 +37,11 @@ def parse_args() -> argparse.Namespace:
         "--output-name",
         default="edge_adapter_calib_inputs_runtime_{dtype}_{mode}_n{n}.npz",
     )
+    parser.add_argument(
+        "--input-prefix",
+        default="edge_adapter_static",
+        help="Prefix used for calibration pack tensor names, e.g. edge_adapter_static or model.",
+    )
     return parser.parse_args()
 
 
@@ -94,12 +99,15 @@ def main() -> int:
 
     output_name = args.output_name.format(n=n, mode=args.delayed_mode, dtype=args.quant_dtype)
     out_path = calib_dir / output_name
+    input_prefix = str(args.input_prefix).strip().rstrip("/")
+    if not input_prefix:
+        raise ValueError("--input-prefix must not be empty")
     np.savez(
         out_path,
         **{
-            "edge_adapter_static/input_layer1": current_q,
-            "edge_adapter_static/input_layer2": delayed_q,
-            "edge_adapter_static/input_layer3": projected_q,
+            f"{input_prefix}/input_layer1": current_q,
+            f"{input_prefix}/input_layer2": delayed_q,
+            f"{input_prefix}/input_layer3": projected_q,
         },
     )
 

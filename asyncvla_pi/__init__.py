@@ -1,5 +1,6 @@
 from .edge_robot_client import EdgeAwareRobotClient, EdgeRobotClientConfig
 from .hailo_edge_runner import HailoEdgeRunner, HailoEdgeRunnerConfig
+from .hybrid_edge_runner import HybridEdgeRunner, HybridEdgeRunnerConfig
 from .image_ring_buffer import ImageRingBuffer, TimestampedFrame
 from .pd_controller import PDController, PDControllerConfig
 try:
@@ -11,7 +12,9 @@ except Exception:  # pragma: no cover
 try:
     from .edge_adapter_model import (
         EdgeAdapter,
+        EdgeAdapterActionHead,
         EdgeAdapterArchitecture,
+        EdgeAdapterFusedBackbone,
         build_edge_adapter_from_state_dict,
         infer_edge_adapter_architecture,
         load_edge_adapter_from_hf_snapshot,
@@ -19,7 +22,9 @@ try:
     )
 except Exception:  # pragma: no cover
     EdgeAdapter = None
+    EdgeAdapterActionHead = None
     EdgeAdapterArchitecture = None
+    EdgeAdapterFusedBackbone = None
     build_edge_adapter_from_state_dict = None
     infer_edge_adapter_architecture = None
     load_edge_adapter_from_hf_snapshot = None
@@ -27,7 +32,9 @@ except Exception:  # pragma: no cover
 
 __all__ = [
     "EdgeAdapter",
+    "EdgeAdapterActionHead",
     "EdgeAdapterArchitecture",
+    "EdgeAdapterFusedBackbone",
     "build_edge_adapter_from_state_dict",
     "infer_edge_adapter_architecture",
     "load_edge_adapter_from_hf_snapshot",
@@ -36,6 +43,8 @@ __all__ = [
     "EdgeRobotClientConfig",
     "HailoEdgeRunner",
     "HailoEdgeRunnerConfig",
+    "HybridEdgeRunner",
+    "HybridEdgeRunnerConfig",
     "TorchEdgeRunner",
     "TorchEdgeRunnerConfig",
     "ImageRingBuffer",

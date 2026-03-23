@@ -20,7 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from asyncvla_pi import HailoEdgeRunner, HailoEdgeRunnerConfig, TorchEdgeRunner, TorchEdgeRunnerConfig
+from asyncvla_pi import (
+    HailoEdgeRunner,
+    HailoEdgeRunnerConfig,
+    HybridEdgeRunner,
+    HybridEdgeRunnerConfig,
+    TorchEdgeRunner,
+    TorchEdgeRunnerConfig,
+)
 
 
 def _decode_image_blob(blob: Any) -> np.ndarray:
@@ -127,13 +134,14 @@ class EdgeCompareService:
             raise RuntimeError("TorchEdgeRunner is unavailable in this Python environment")
 
         self.lock = threading.Lock()
+        self.hef_backend = str(args.hef_backend)
         self.duplicate_current_as_delayed = bool(args.duplicate_current_as_delayed)
         self.allclose_rtol = float(args.allclose_rtol)
         self.allclose_atol = float(args.allclose_atol)
         self.uploaded_hef_dir = Path(args.uploaded_hef_dir).expanduser().resolve()
         self.uploaded_hef_dir.mkdir(parents=True, exist_ok=True)
         self.active_hef_path: Path | None = None
-        self.hailo_runner: HailoEdgeRunner | None = None
+        self.hef_runner: HailoEdgeRunner | HybridEdgeRunner | None = None
         self._hailo_runner_kwargs = {
             "input_current_image": args.input_current_name,
             "input_delayed_image": args.input_delayed_name,
@@ -152,6 +160,28 @@ class EdgeCompareService:
             "convert_bgr_to_rgb": args.convert_bgr_to_rgb,
             "token_uint8_mode": args.token_quant_mode,
             "token_quant_params_path": args.token_quant_params,
+        }
+        self._hybrid_runner_kwargs = {
+            "hf_dir": args.hf_dir,
+            "checkpoint_name": args.shead_checkpoint,
+            "mha_num_attention_heads": args.mha_num_attention_heads,
+            "input_current_image": args.input_current_name,
+            "input_delayed_image": args.input_delayed_name,
+            "input_projected_tokens": args.input_tokens_name,
+            "output_fused_feature": args.output_fused_name,
+            "image_height": args.image_height,
+            "image_width": args.image_width,
+            "fused_dim": args.fused_dim,
+            "normalize_imagenet": args.normalize_imagenet,
+            "image_layout": args.image_layout,
+            "input_format_type": args.input_format,
+            "output_format_type": args.output_format,
+            "image_scale_255": args.image_scale_255,
+            "convert_bgr_to_rgb": args.convert_bgr_to_rgb,
+            "token_uint8_mode": args.token_quant_mode,
+            "token_quant_params_path": args.token_quant_params,
+            "device": args.torch_device,
+            "dtype": args.torch_dtype,
         }
 
         self.torch_runner = TorchEdgeRunner(
@@ -176,7 +206,33 @@ class EdgeCompareService:
         if args.hef:
             self.set_hef(Path(args.hef).expanduser().resolve())
 
-    def _create_hailo_runner(self, hef_path: Path) -> HailoEdgeRunner:
+    def _create_hef_runner(self, hef_path: Path) -> HailoEdgeRunner | HybridEdgeRunner:
+        if self.hef_backend == "hef_torch_head":
+            return HybridEdgeRunner(
+                HybridEdgeRunnerConfig(
+                    hef_path=str(hef_path),
+                    hf_dir=str(self._hybrid_runner_kwargs["hf_dir"]),
+                    checkpoint_name=str(self._hybrid_runner_kwargs["checkpoint_name"]),
+                    mha_num_attention_heads=int(self._hybrid_runner_kwargs["mha_num_attention_heads"]),
+                    input_current_image=str(self._hybrid_runner_kwargs["input_current_image"]),
+                    input_delayed_image=str(self._hybrid_runner_kwargs["input_delayed_image"]),
+                    input_projected_tokens=str(self._hybrid_runner_kwargs["input_projected_tokens"]),
+                    output_fused_feature=str(self._hybrid_runner_kwargs["output_fused_feature"]),
+                    image_height=int(self._hybrid_runner_kwargs["image_height"]),
+                    image_width=int(self._hybrid_runner_kwargs["image_width"]),
+                    fused_dim=int(self._hybrid_runner_kwargs["fused_dim"]),
+                    normalize_imagenet=bool(self._hybrid_runner_kwargs["normalize_imagenet"]),
+                    image_layout=str(self._hybrid_runner_kwargs["image_layout"]),
+                    input_format_type=str(self._hybrid_runner_kwargs["input_format_type"]),
+                    output_format_type=str(self._hybrid_runner_kwargs["output_format_type"]),
+                    image_scale_255=bool(self._hybrid_runner_kwargs["image_scale_255"]),
+                    convert_bgr_to_rgb=bool(self._hybrid_runner_kwargs["convert_bgr_to_rgb"]),
+                    token_uint8_mode=str(self._hybrid_runner_kwargs["token_uint8_mode"]),
+                    token_quant_params_path=self._hybrid_runner_kwargs["token_quant_params_path"],
+                    device=str(self._hybrid_runner_kwargs["device"]),
+                    dtype=str(self._hybrid_runner_kwargs["dtype"]),
+                )
+            )
         return HailoEdgeRunner(
             HailoEdgeRunnerConfig(
                 hef_path=str(hef_path),
@@ -205,9 +261,9 @@ class EdgeCompareService:
         if not resolved.exists():
             raise FileNotFoundError(f"HEF not found: {resolved}")
         with self.lock:
-            if self.hailo_runner is not None:
-                self.hailo_runner.close()
-            self.hailo_runner = self._create_hailo_runner(resolved)
+            if self.hef_runner is not None:
+                self.hef_runner.close()
+            self.hef_runner = self._create_hef_runner(resolved)
             self.active_hef_path = resolved
         return {"hef_path": str(resolved)}
 
@@ -249,9 +305,9 @@ class EdgeCompareService:
             torch_ms = (time.perf_counter() - t_torch) * 1000.0
 
             t_hailo = time.perf_counter()
-            if self.hailo_runner is None:
+            if self.hef_runner is None:
                 raise RuntimeError("No active HEF is loaded. Upload one with POST /hef first.")
-            hailo_out = self.hailo_runner.infer(
+            hailo_out = self.hef_runner.infer(
                 current_image=current_image,
                 delayed_image=delayed_image,
                 projected_tokens=projected_tokens,
@@ -289,8 +345,8 @@ class EdgeCompareService:
         }
 
     def close(self) -> None:
-        if self.hailo_runner is not None:
-            self.hailo_runner.close()
+        if self.hef_runner is not None:
+            self.hef_runner.close()
         self.torch_runner.close()
 
 
@@ -355,6 +411,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
+    parser.add_argument("--hef-backend", choices=["hef", "hef_torch_head"], default="hef")
     parser.add_argument("--hef", default="models/edge_adapter_v520.hef")
     parser.add_argument("--shead-checkpoint", default="shead--750000_checkpoint.pt")
     parser.add_argument("--mha-num-attention-heads", type=int, default=4)
@@ -380,6 +437,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-tokens-name", default="edge/input_layer3")
     parser.add_argument("--input-goal-name", default=None)
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
+    parser.add_argument("--output-fused-name", default="fused_feature")
+    parser.add_argument("--fused-dim", type=int, default=1024)
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
     parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
     parser.add_argument("--output-format", choices=["uint8", "int8", "float32", "auto"], default="float32")
@@ -424,6 +483,7 @@ def main() -> None:
     print(f"Edge compare server listening: http://{args.host}:{args.port}/infer")
     print(f"HF snapshot: {hf_dir}")
     print(f"HEF: {hef_path if hef_path is not None else '(none; waiting for upload via POST /hef)'}")
+    print(f"HEF backend: {args.hef_backend}")
     print(f"Torch device/dtype: {args.torch_device}/{args.torch_dtype}")
     print(f"Torch preprocess mode: {args.torch_preprocess_mode}")
     print(

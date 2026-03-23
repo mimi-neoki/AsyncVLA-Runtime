@@ -18,6 +18,8 @@ from asyncvla_pi import (
     EdgeRobotClientConfig,
     HailoEdgeRunner,
     HailoEdgeRunnerConfig,
+    HybridEdgeRunner,
+    HybridEdgeRunnerConfig,
     PDController,
     PDControllerConfig,
     TorchEdgeRunner,
@@ -29,7 +31,7 @@ from raspi_mobile_robot import RaspiMobileRobot, RaspiMobileRobotConfig, TwistCo
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Pi-side edge adapter client and connect to base-VLA server")
     parser.add_argument("--policy-url", required=True, help="e.g. http://<gpu-server-ip>:8000/infer")
-    parser.add_argument("--edge-backend", choices=["hef", "hf"], default="hef")
+    parser.add_argument("--edge-backend", choices=["hef", "hf", "hef_torch_head"], default="hef")
     parser.add_argument("--hef", default="models/edge_adapter_v520.hef")
     parser.add_argument("--hf-dir", default="~/gitrepo/AsyncVLA_release")
     parser.add_argument("--edge-device", default="cpu", help="Used only when --edge-backend=hf")
@@ -84,6 +86,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-delayed-name", default="edge/input_layer2")
     parser.add_argument("--input-tokens-name", default="edge/input_layer3")
     parser.add_argument("--output-chunk-name", default="edge/depth_to_space1")
+    parser.add_argument("--output-fused-name", default="fused_feature")
+    parser.add_argument("--fused-dim", type=int, default=1024)
 
     parser.add_argument("--image-layout", choices=["nhwc", "nchw"], default="nhwc")
     parser.add_argument("--input-format", choices=["uint8", "int8", "float32", "auto"], default="uint8")
@@ -141,7 +145,7 @@ def _ensure_hailo_runtime_available() -> None:
 
 def main() -> None:
     args = parse_args()
-    if args.edge_backend == "hef":
+    if args.edge_backend in {"hef", "hef_torch_head"}:
         _ensure_hailo_runtime_available()
     libcamerify_active = os.environ.get("ASYNCVLA_LIBCAMERIFY_ACTIVE") == "1"
     if args.libcamerify == "on" and not libcamerify_active:
@@ -151,7 +155,7 @@ def main() -> None:
 
     hef_path = Path(args.hef).expanduser().resolve()
     hf_dir = Path(args.hf_dir).expanduser().resolve()
-    if args.edge_backend == "hef" and not hef_path.exists():
+    if args.edge_backend in {"hef", "hef_torch_head"} and not hef_path.exists():
         raise FileNotFoundError(f"HEF not found: {hef_path}")
     if args.edge_backend == "hf" and not hf_dir.exists():
         raise FileNotFoundError(f"HF directory not found: {hf_dir}")
@@ -204,6 +208,30 @@ def main() -> None:
                 token_quant_params_path=args.token_quant_params,
             )
         )
+    elif args.edge_backend == "hef_torch_head":
+        edge_runner = HybridEdgeRunner(
+            HybridEdgeRunnerConfig(
+                hef_path=str(hef_path),
+                hf_dir=str(hf_dir),
+                input_current_image=args.input_current_name,
+                input_delayed_image=args.input_delayed_name,
+                input_projected_tokens=args.input_tokens_name,
+                output_fused_feature=args.output_fused_name,
+                image_height=96,
+                image_width=96,
+                fused_dim=args.fused_dim,
+                image_layout=args.image_layout,
+                input_format_type=args.input_format,
+                output_format_type=args.output_format,
+                normalize_imagenet=args.normalize_imagenet,
+                image_scale_255=args.image_scale_255,
+                convert_bgr_to_rgb=True,
+                token_uint8_mode=args.token_quant_mode,
+                token_quant_params_path=args.token_quant_params,
+                device=args.edge_device,
+                dtype=args.edge_dtype,
+            )
+        )
     else:
         if TorchEdgeRunner is None or TorchEdgeRunnerConfig is None:
             raise RuntimeError("TorchEdgeRunner is unavailable. Install torch dependencies for --edge-backend=hf.")
@@ -245,6 +273,13 @@ def main() -> None:
     print(f"edge_backend={args.edge_backend}")
     if args.edge_backend == "hef":
         print(f"hef={hef_path}")
+    elif args.edge_backend == "hef_torch_head":
+        print(f"hef={hef_path}")
+        print(f"hf_dir={hf_dir}")
+        print(f"edge_device={args.edge_device}")
+        print(f"edge_dtype={args.edge_dtype}")
+        print(f"output_fused_name={args.output_fused_name}")
+        print(f"fused_dim={args.fused_dim}")
     else:
         print(f"hf_dir={hf_dir}")
         print(f"edge_device={args.edge_device}")
@@ -258,9 +293,10 @@ def main() -> None:
     if args.satellite is not None:
         print(f"satellite={args.satellite}")
     print(f"metric_waypoint_spacing={args.metric_waypoint_spacing}")
+    output_name = args.output_fused_name if args.edge_backend == "hef_torch_head" else args.output_chunk_name
     print(
         f"inputs(current, delayed, tokens)=({args.input_current_name}, {args.input_delayed_name}, {args.input_tokens_name}), "
-        f"output={args.output_chunk_name}"
+        f"output={output_name}"
     )
     client.run_forever()
 
