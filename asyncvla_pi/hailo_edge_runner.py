@@ -309,7 +309,7 @@ class HailoEdgeRunner:
         self._mode = "infer_model"
         self._ready = True
 
-    def _get_output_quant_info(self, output_name: str) -> tuple[float, float] | None:
+    def _get_output_quant_info(self, output_name: str) -> tuple[np.ndarray, np.ndarray] | None:
         model = self._infer_model if self._infer_model is not None else self._quant_info_model
         if model is None:
             return None
@@ -324,19 +324,49 @@ class HailoEdgeRunner:
             except Exception:
                 continue
             if quant_infos:
-                qinfo = quant_infos[0]
-                return float(qinfo.qp_scale), float(qinfo.qp_zp)
+                scales = np.asarray([float(qinfo.qp_scale) for qinfo in quant_infos], dtype=np.float32)
+                zps = np.asarray([float(qinfo.qp_zp) for qinfo in quant_infos], dtype=np.float32)
+                return scales, zps
         return None
+
+    @staticmethod
+    def _reshape_quant_params_for_output(
+        values: np.ndarray,
+        scales: np.ndarray,
+        zps: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if scales.size == 1:
+            return scales.reshape(()), zps.reshape(())
+
+        if values.ndim >= 1 and values.shape[-1] == scales.size:
+            shape = [1] * values.ndim
+            shape[-1] = scales.size
+            return scales.reshape(shape), zps.reshape(shape)
+
+        if values.ndim >= 2 and values.shape[1] == scales.size:
+            shape = [1] * values.ndim
+            shape[1] = scales.size
+            return scales.reshape(shape), zps.reshape(shape)
+
+        flat_values = values.reshape(-1)
+        if flat_values.size == scales.size:
+            return scales.reshape(values.shape), zps.reshape(values.shape)
+
+        raise ValueError(
+            f"Unsupported quant info shape: values={values.shape}, quant_infos={scales.size}"
+        )
 
     def _dequantize_output(self, output_name: str, output: np.ndarray) -> np.ndarray:
         """Dequantize integer output buffers to float32 using Hailo quant metadata."""
-        if not np.issubdtype(np.asarray(output).dtype, np.integer):
-            return np.asarray(output, dtype=np.float32)
+        values = np.asarray(output)
+        if not np.issubdtype(values.dtype, np.integer):
+            return np.asarray(values, dtype=np.float32)
         qinfo = self._get_output_quant_info(output_name)
         if qinfo is None:
-            return np.asarray(output, dtype=np.float32)
-        scale, zp = qinfo
-        return (np.asarray(output, dtype=np.float32) - zp) * scale
+            return np.asarray(values, dtype=np.float32)
+        scales, zps = qinfo
+        scales_bc, zps_bc = self._reshape_quant_params_for_output(values, scales, zps)
+        return (np.asarray(values, dtype=np.float32) - zps_bc) * scales_bc
 
     @staticmethod
     def _align_rank_for_infer_model(array: np.ndarray, expected_rank: int) -> np.ndarray:
