@@ -363,7 +363,9 @@ class HailoEdgeRunner:
             return np.asarray(values, dtype=np.float32)
         qinfo = self._get_output_quant_info(output_name)
         if qinfo is None:
-            return np.asarray(values, dtype=np.float32)
+            raise RuntimeError(
+                f"Cannot dequantize integer output {output_name!r}: Hailo quantization metadata is missing"
+            )
         scales, zps = qinfo
         scales_bc, zps_bc = self._reshape_quant_params_for_output(values, scales, zps)
         return (np.asarray(values, dtype=np.float32) - zps_bc) * scales_bc
@@ -400,8 +402,9 @@ class HailoEdgeRunner:
                 output = output_dict[self._resolved_output_name]
             elif self.config.output_action_chunk in output_dict:
                 output = output_dict[self.config.output_action_chunk]
+                self._resolved_output_name = self.config.output_action_chunk
             else:
-                output = next(iter(output_dict.values()))
+                self._resolved_output_name, output = next(iter(output_dict.items()))
         else:
             configured = self._configured_infer_model
             bindings = configured.create_bindings()
@@ -417,6 +420,7 @@ class HailoEdgeRunner:
                 output_name = self.config.output_action_chunk
             if output_name not in self._infer_model.output_names:
                 output_name = self._infer_model.output_names[0]
+            self._resolved_output_name = output_name
             out_shape = tuple(self._infer_model.output(output_name).shape)
             # InferModel expects a native-quantized buffer shape/size.
             # Use a quantized integer buffer and dequantize manually when float output is requested.

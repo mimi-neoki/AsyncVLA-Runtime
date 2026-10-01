@@ -47,6 +47,8 @@ def parse_args() -> argparse.Namespace:
         help="roll_fullset matches calib_data generation: delayed image is previous sample in the full dataset.",
     )
     parser.add_argument("--jpeg-quality", type=int, default=90)
+    parser.add_argument("--image-encoding", choices=["jpeg", "raw"], default="jpeg")
+    parser.add_argument("--include-diagnostics", action="store_true")
     parser.add_argument(
         "--compare-reference",
         choices=["server", "local_torch"],
@@ -106,6 +108,14 @@ def _make_image_blob(image_rgb: np.ndarray, quality: int) -> dict[str, Any]:
         "data": _encode_jpeg_base64(image_rgb, quality=quality),
         "shape": list(image_rgb.shape),
     }
+
+
+def _payload_image_rgb(blob: dict[str, Any]) -> np.ndarray:
+    """Use the exact pixels decoded by the server for the local reference."""
+    if blob.get("encoding") == "jpeg_base64":
+        with Image.open(BytesIO(base64.b64decode(blob["data"]))) as image:
+            return np.asarray(image.convert("RGB"), dtype=np.uint8)
+    return np.asarray(blob["data"], dtype=np.uint8).reshape(blob["shape"])
 
 
 def _load_rgb_image(path: Path) -> np.ndarray:
@@ -184,11 +194,17 @@ def _build_payload(
     delayed_rgb: np.ndarray,
     projected_tokens: np.ndarray,
     jpeg_quality: int,
+    image_encoding: str = "jpeg",
 ) -> dict[str, Any]:
+    def image_blob(rgb: np.ndarray) -> dict[str, Any]:
+        if image_encoding == "raw":
+            return {"data": np.asarray(rgb, dtype=np.uint8).tolist(), "shape": list(rgb.shape)}
+        return _make_image_blob(rgb, quality=jpeg_quality)
+
     return {
         "timestamp_ns": time.monotonic_ns(),
-        "current_image": _make_image_blob(current_rgb, quality=jpeg_quality),
-        "delayed_image": _make_image_blob(delayed_rgb, quality=jpeg_quality),
+        "current_image": image_blob(current_rgb),
+        "delayed_image": image_blob(delayed_rgb),
         "projected_tokens": np.asarray(projected_tokens, dtype=np.float32).tolist(),
     }
 
@@ -316,6 +332,7 @@ def main() -> int:
         "images_dir": str(images_dir),
         "projected_tokens": str(projected_tokens_path),
         "selected_indices": indices,
+        "evaluation_config": vars(args),
         "candidates": [],
     }
 
@@ -341,18 +358,21 @@ def main() -> int:
                 delayed_rgb=delayed_rgb,
                 projected_tokens=projected_tokens[idx],
                 jpeg_quality=args.jpeg_quality,
+                image_encoding=args.image_encoding,
             )
+            if args.include_diagnostics:
+                payload["include_diagnostics"] = True
 
-            if pos < max(args.warmup, 0):
-                _post_infer(args.edge_url, args.timeout_s, payload)
-                continue
+            if pos == 0:
+                for _ in range(max(args.warmup, 0)):
+                    _post_infer(args.edge_url, args.timeout_s, payload)
 
             body = _post_infer(args.edge_url, args.timeout_s, payload)
             diff_report = body.get("diff_report", {})
             if local_torch_runner is not None:
                 torch_ref = local_torch_runner.infer(
-                    current_image=current_rgb,
-                    delayed_image=delayed_rgb,
+                    current_image=_payload_image_rgb(payload["current_image"]),
+                    delayed_image=_payload_image_rgb(payload["delayed_image"]),
                     projected_tokens=projected_tokens[idx],
                     goal_pose=None,
                 )
@@ -367,10 +387,13 @@ def main() -> int:
                     "diff_report": diff_report,
                     "latency_ms": body.get("latency_ms", {}),
                     "hef_path": body.get("hef_path"),
+                    "reference_action_chunk": torch_ref.tolist() if local_torch_runner is not None else body.get("torch_action_chunk"),
+                    "hef_action_chunk": body.get("hef_action_chunk"),
+                    "diagnostics": body.get("diagnostics"),
                 }
             )
             if len(sample_results) % 25 == 0:
-                print(f"[{hef.name}] evaluated {len(sample_results)}/{max(0, len(indices) - max(args.warmup, 0))}")
+                print(f"[{hef.name}] evaluated {len(sample_results)}/{len(indices)}")
 
         summary = _summarize_candidate(sample_results)
         candidate_report = {

@@ -1,6 +1,19 @@
 import numpy as np
+import pytest
 
 from asyncvla_pi.hailo_edge_runner import HailoEdgeRunner, HailoEdgeRunnerConfig
+
+
+def test_missing_quant_metadata_cannot_silently_return_integer_codes() -> None:
+    runner = HailoEdgeRunner(HailoEdgeRunnerConfig(hef_path="dummy.hef"))
+    with pytest.raises(RuntimeError, match="quantization metadata is missing"):
+        runner._dequantize_output("latent", np.asarray([128], dtype=np.uint8))
+
+
+def test_float_output_is_not_dequantized_twice() -> None:
+    runner = HailoEdgeRunner(HailoEdgeRunnerConfig(hef_path="dummy.hef"))
+    out = np.asarray([-0.5, 0.0, 0.5], dtype=np.float32)
+    np.testing.assert_array_equal(runner._dequantize_output("latent", out), out)
 
 
 def test_dequantize_output_scalar_quant_info() -> None:

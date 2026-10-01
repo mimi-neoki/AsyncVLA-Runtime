@@ -291,6 +291,7 @@ class EdgeCompareService:
         projected_tokens = _extract_projected_tokens(payload)
         goal_pose = _extract_goal_pose(payload)
         timestamp_ns = int(payload.get("timestamp_ns", time.monotonic_ns()))
+        diagnostics = None
 
         with self.lock:
             t0 = time.perf_counter()
@@ -316,6 +317,42 @@ class EdgeCompareService:
             hailo_ms = (time.perf_counter() - t_hailo) * 1000.0
 
             total_ms = (time.perf_counter() - t0) * 1000.0
+            if payload.get("include_diagnostics", False):
+                runner = self.hef_runner
+                hailo = runner.hailo_runner if isinstance(runner, HybridEdgeRunner) else runner
+                qinfo = hailo._get_output_quant_info(hailo._resolved_output_name)
+                diagnostics = {
+                    "hef_backend": self.hef_backend,
+                    "hailo_api": hailo._mode,
+                    "resolved_output": hailo._resolved_output_name,
+                    "input_format": hailo.config.input_format_type,
+                    "output_format": hailo.config.output_format_type,
+                    "image_layout": hailo.config.image_layout,
+                    "convert_bgr_to_rgb": hailo.config.convert_bgr_to_rgb,
+                    "normalize_imagenet": hailo.config.normalize_imagenet,
+                    "image_scale_255": hailo.config.image_scale_255,
+                    "token_quant_mode": hailo.config.token_uint8_mode,
+                    "token_quant_params_path": hailo.config.token_quant_params_path,
+                    "output_scales": None if qinfo is None else qinfo[0].tolist(),
+                    "output_zero_points": None if qinfo is None else qinfo[1].tolist(),
+                }
+                if hailo._token_quant_params is not None:
+                    diagnostics["token_scales_sha256"] = hashlib.sha256(
+                        np.asarray(hailo._token_quant_params["scales"], dtype="<f4").tobytes()
+                    ).hexdigest()
+                    diagnostics["token_zero_point"] = int(hailo._token_quant_params["zero_point"])
+                # Recreate deterministic host buffers only for diagnostic requests.
+                input_buffers = hailo._build_inputs(current_image, delayed_image, projected_tokens, goal_pose)
+                diagnostics["input_buffers"] = {
+                    hailo._map_input_name(name): {
+                        "shape": list(value.shape),
+                        "dtype": str(value.dtype),
+                        "sha256": hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest(),
+                    }
+                    for name, value in input_buffers.items()
+                }
+                if isinstance(runner, HybridEdgeRunner) and runner.last_fused_feature is not None:
+                    diagnostics["hef_fused_feature"] = runner.last_fused_feature.tolist()
 
         torch_arr = np.asarray(torch_out, dtype=np.float32)
         hailo_arr = np.asarray(hailo_out, dtype=np.float32)
@@ -342,6 +379,7 @@ class EdgeCompareService:
                 "goal_pose_shape": None if goal_pose is None else list(goal_pose.shape),
             },
             "hef_path": None if self.active_hef_path is None else str(self.active_hef_path),
+            "diagnostics": diagnostics,
         }
 
     def close(self) -> None:

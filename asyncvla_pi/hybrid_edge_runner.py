@@ -90,6 +90,7 @@ class HybridEdgeRunner:
             )
         self.model = model.to(device=self.device, dtype=self.dtype)
         self.model.eval()
+        self.last_fused_feature: np.ndarray | None = None
 
     @staticmethod
     def _resolve_dtype(dtype_name: str) -> Any:
@@ -125,6 +126,9 @@ class HybridEdgeRunner:
             pass
         else:
             fused = fused.reshape(fused.shape[0], -1)
+        if fused.shape[1] != self.config.fused_dim:
+            raise ValueError(f"Expected fused feature dimension {self.config.fused_dim}, got {fused.shape}")
+        self.last_fused_feature = fused.copy()
         with torch.inference_mode():
             fused_t = torch.from_numpy(fused).to(device=self.device, dtype=self.dtype)
             out = self.model.predict_action_from_fused(fused_t)
@@ -132,4 +136,3 @@ class HybridEdgeRunner:
 
     def close(self) -> None:
         self.hailo_runner.close()
-
